@@ -2,7 +2,7 @@ name: High Frequency Scraper
 
 on:
   schedule:
-    - cron: '*/2 * * * *' # Maksimum GitHub frekansı (5 dakika)
+    - cron: '*/5 * * * *' # Maksimum GitHub frekansı (5 dakika)
   workflow_dispatch:
 
 jobs:
