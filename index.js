@@ -28,7 +28,7 @@ const SOURCES = [
     },
     {
         name: 'bhw',
-        url: 'https://www.blackhatworld.com/forums/',
+        url: 'https://www.blackhatworld.com/',
         containerSelector: '.block-body',
         threadSelector: '.structItem--thread .structItem-title a[data-preview-url]',
         contentSelector: '.message-body .bbWrapper, .message-content .bbWrapper'
