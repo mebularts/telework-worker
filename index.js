@@ -27,6 +27,7 @@ const SOURCES = [
 
 async function scrape() {
     console.log(`[${new Date().toISOString()}] Starting high-frequency homepage scrape...`);
+    console.log(`Current Working Directory: ${process.cwd()}`);
 
     if (!WEBHOOK_URL || !SCRAPER_TOKEN) {
         console.error("Missing WEBHOOK_URL or SCRAPER_TOKEN!");
@@ -42,8 +43,13 @@ async function scrape() {
 
     for (const source of SOURCES) {
         try {
-            console.log(`Navigating to ${source.name} homepage...`);
+            console.log(`Navigating to ${source.name} homepage: ${source.url}`);
             await page.goto(source.url, { waitUntil: 'networkidle', timeout: 45000 });
+
+            const safeName = source.name.replace(/[^a-z0-0]/gi, '_').toLowerCase();
+
+            // Take a screenshot immediately after navigation
+            await page.screenshot({ path: `nav_${safeName}.png`, fullPage: true });
 
             try {
                 await page.waitForSelector(source.containerSelector, { timeout: 15000 });
@@ -54,16 +60,14 @@ async function scrape() {
 
                 console.warn(`[${source.name}] Timeout! Page Title: "${title}"`);
                 if (isCloudflare) {
-                    console.error(`[${source.name}] 🛡️ Cloudflare detected! GitHub Actions IP might be blocked.`);
+                    console.error(`[${source.name}] 🛡️ Cloudflare detected!`);
                 } else {
-                    console.warn(`[${source.name}] Selector "${source.containerSelector}" not found, but Cloudflare not explicitly detected.`);
+                    console.warn(`[${source.name}] Selector "${source.containerSelector}" not found.`);
                 }
 
-                // Save screenshot and HTML for debugging
-                const safeName = source.name.replace(/[^a-z0-0]/gi, '_').toLowerCase();
-                await page.screenshot({ path: `error_${safeName}.png`, fullPage: true });
                 require('fs').writeFileSync(`error_${safeName}.html`, content);
-                console.log(`[${source.name}] Debug artifacts saved (error_${safeName}.png/html)`);
+                await page.screenshot({ path: `error_${safeName}.png`, fullPage: true });
+                console.log(`[${source.name}] Error artifacts saved.`);
             }
 
             // R10 ve WMAraci ana sayfadaki son konuları çek
@@ -76,7 +80,6 @@ async function scrape() {
                     const url = el.href;
 
                     if (title && url) {
-                        // Ensure it's a forum link
                         if (url.includes('.html') || url.includes('/forum/') || url.includes('thread') || url.includes('konu')) {
                             if (!results.find(r => r.url === url)) {
                                 results.push({ title, url });
@@ -87,7 +90,7 @@ async function scrape() {
                 return results.slice(0, 40);
             }, source);
 
-            console.log(`Found ${threads.length} topics on ${source.name} homepage.`);
+            console.log(`[${source.name}] Found ${threads.length} topics.`);
 
             if (threads.length > 0) {
                 await axios.post(WEBHOOK_URL, {
@@ -96,12 +99,19 @@ async function scrape() {
                     source: source.name,
                     data: threads
                 });
-                console.log(`Pushed data for ${source.name}`);
+                console.log(`[${source.name}] Pushed data to webhook.`);
+            } else {
+                // If 0 topics found, save HTML to see why
+                const content = await page.content();
+                require('fs').writeFileSync(`zero_${safeName}.html`, content);
+                await page.screenshot({ path: `zero_${safeName}.png`, fullPage: true });
+                console.log(`[${source.name}] 0 topics found. Zero-match artifacts saved.`);
             }
 
         } catch (error) {
-            console.error(`Error on ${source.name}:`, error.message);
-            await page.screenshot({ path: `critical_error_${source.name}.png` });
+            console.error(`[${source.name}] Critical Error:`, error.message);
+            const safeName = source.name.replace(/[^a-z0-0]/gi, '_').toLowerCase();
+            await page.screenshot({ path: `critical_${safeName}.png` });
         }
     }
 
