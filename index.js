@@ -15,13 +15,13 @@ const SOURCES = [
         name: 'r10',
         url: 'https://www.r10.net/',
         containerSelector: '#tab-sonAcilan .list ul',
-        threadSelector: '#tab-sonAcilan .list ul li a.h5'
+        threadSelector: '#tab-sonAcilan .list ul li.thread .title a'
     },
     {
         name: 'wmaraci',
         url: 'https://wmaraci.com/',
         containerSelector: '.forumLastSubject .content ul',
-        threadSelector: '.forumLastSubject .content ul li:not(.h) strong a'
+        threadSelector: '.forumLastSubject .content ul li.open span a[href*="/forum/"]'
     }
 ];
 
