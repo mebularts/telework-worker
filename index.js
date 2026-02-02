@@ -45,15 +45,25 @@ async function scrape() {
             console.log(`Navigating to ${source.name} homepage...`);
             await page.goto(source.url, { waitUntil: 'networkidle', timeout: 45000 });
 
-            // Wait for the specific container to appear (AJAX content)
             try {
                 await page.waitForSelector(source.containerSelector, { timeout: 15000 });
             } catch (e) {
-                console.warn(`Timeout waiting for ${source.containerSelector} on ${source.name}, saving debug info...`);
+                const title = await page.title();
+                const content = await page.content();
+                const isCloudflare = content.includes('cloudflare') || content.includes('ray-id') || title.includes('Attention Required');
+
+                console.warn(`[${source.name}] Timeout! Page Title: "${title}"`);
+                if (isCloudflare) {
+                    console.error(`[${source.name}] 🛡️ Cloudflare detected! GitHub Actions IP might be blocked.`);
+                } else {
+                    console.warn(`[${source.name}] Selector "${source.containerSelector}" not found, but Cloudflare not explicitly detected.`);
+                }
+
                 // Save screenshot and HTML for debugging
-                await page.screenshot({ path: `error_${source.name}.png`, fullPage: true });
-                const html = await page.content();
-                require('fs').writeFileSync(`error_${source.name}.html`, html);
+                const safeName = source.name.replace(/[^a-z0-0]/gi, '_').toLowerCase();
+                await page.screenshot({ path: `error_${safeName}.png`, fullPage: true });
+                require('fs').writeFileSync(`error_${safeName}.html`, content);
+                console.log(`[${source.name}] Debug artifacts saved (error_${safeName}.png/html)`);
             }
 
             // R10 ve WMAraci ana sayfadaki son konuları çek
