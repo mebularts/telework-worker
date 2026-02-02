@@ -27,3 +27,13 @@ jobs:
         env:
           WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
           SCRAPER_TOKEN: ${{ secrets.SCRAPER_TOKEN }}
+
+      - name: Upload Debug Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scraper-debug
+          path: |
+            *.png
+            *.html
+          retention-days: 1
