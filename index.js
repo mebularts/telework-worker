@@ -30,6 +30,7 @@ const COOKIE_ENV_KEY = 'SCRAPER_COOKIES_JSON';
 const COOKIE_ENV_KEY_ALT = 'SCRAPER_COOKIES';
 const COOKIE_FILES_ENV = 'SCRAPER_COOKIES_FILES';
 const COOKIE_FILES_ENV_ALT = 'SCRAPER_COOKIES_FILE';
+let HAS_COOKIES = false;
 
 const JOB_URL_HINTS = [
     '/is-ilan', '/is-ilani', '/is-ilanlari',
@@ -323,14 +324,25 @@ function normalizeCookie(cookie) {
         c.expires = c.expirationDate;
         delete c.expirationDate;
     }
-    if (c.sameSite) {
+    if (c.sameSite === null || c.sameSite === undefined || c.sameSite === '') {
+        delete c.sameSite;
+    } else {
         const map = {
             lax: 'Lax',
             strict: 'Strict',
-            none: 'None'
+            none: 'None',
+            no_restriction: 'None',
+            unrestricted: 'None',
+            unspecified: undefined,
+            'no_restriction': 'None'
         };
         const key = String(c.sameSite).toLowerCase();
-        c.sameSite = map[key] || c.sameSite;
+        const mapped = map[key];
+        if (mapped) {
+            c.sameSite = mapped;
+        } else if (mapped === undefined && (key === 'unspecified')) {
+            delete c.sameSite;
+        }
     }
     return c;
 }
@@ -358,6 +370,7 @@ async function applyCookiesFromEnv(context) {
     try {
         await context.addCookies(finalCookies);
         console.log(`[cookies] Loaded ${finalCookies.length} cookies`);
+        HAS_COOKIES = true;
     } catch (e) {
         console.warn(`[cookies] Failed to apply cookies: ${e.message.split('\n')[0]}`);
     }
@@ -448,19 +461,23 @@ function extractXmlPayload(text) {
 
 async function fetchXmlViaBrowser(url, context) {
     if (!context) return null;
+    const isViewSource = url && url.startsWith('view-source:');
+    const actualUrl = isViewSource ? url.replace(/^view-source:/i, '') : url;
     try {
-        const response = await context.request.get(url, {
-            headers: {
-                'User-Agent': DEFAULT_UA,
-                'Accept': 'application/xml,text/xml,application/rss+xml,*/*'
-            },
-            timeout: 30000
-        });
-        if (response.ok()) {
-            const text = await response.text();
-            const payload = extractXmlPayload(text);
-            if (payload.includes('<urlset') || payload.includes('<rss') || payload.includes('<sitemapindex') || payload.includes('<feed')) {
-                return payload;
+        if (!isViewSource) {
+            const response = await context.request.get(actualUrl, {
+                headers: {
+                    'User-Agent': DEFAULT_UA,
+                    'Accept': 'application/xml,text/xml,application/rss+xml,*/*'
+                },
+                timeout: 30000
+            });
+            if (response.ok()) {
+                const text = await response.text();
+                const payload = extractXmlPayload(text);
+                if (payload.includes('<urlset') || payload.includes('<rss') || payload.includes('<sitemapindex') || payload.includes('<feed')) {
+                    return payload;
+                }
             }
         }
     } catch (e) {
@@ -469,7 +486,7 @@ async function fetchXmlViaBrowser(url, context) {
 
     const page = await context.newPage();
     try {
-        await page.goto(url, { waitUntil: 'networkidle', timeout: 45000 });
+        await page.goto(isViewSource ? url : actualUrl, { waitUntil: 'networkidle', timeout: 45000 });
         await page.waitForTimeout(1200);
         const raw = await page.evaluate(() => {
             const pre = document.querySelector('pre');
@@ -493,6 +510,10 @@ async function fetchXmlViaBrowser(url, context) {
 async function fetchXml(url, context) {
     if (url && url.startsWith('view-source:')) {
         return await fetchXmlViaBrowser(url, context);
+    }
+    if (HAS_COOKIES && context) {
+        const viaBrowser = await fetchXmlViaBrowser(url, context);
+        if (viaBrowser) return viaBrowser;
     }
     try {
         const response = await axios.get(url, {
