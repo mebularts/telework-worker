@@ -158,9 +158,9 @@ const CONTENT_SELECTORS = {
 const SOURCES = [
     {
         name: 'r10',
-        url: 'https://www.r10.net/',
-        containerSelector: '#tab-sonAcilan .list ul',
-        threadSelector: '#tab-sonAcilan .list ul li.thread .title a',
+        url: 'https://www.r10.net/search.php?do=getnew',
+        containerSelector: '.threadList.search',
+        threadSelector: 'a[id^="thread_title_"]',
         contentSelector: CONTENT_SELECTORS.r10
     },
     {
@@ -172,9 +172,9 @@ const SOURCES = [
     },
     {
         name: 'bhw',
-        url: 'https://www.blackhatworld.com/',
-        containerSelector: '.p-body',
-        threadSelector: '.structItem--thread .structItem-title a, .block-row .contentRow-title a',
+        url: 'https://www.blackhatworld.com/forums/hire-a-freelancer.77/',
+        containerSelector: '.structItemContainer, .p-body',
+        threadSelector: '.structItem-title a, .block-row .contentRow-title a',
         contentSelector: CONTENT_SELECTORS.bhw
     }
 ];
@@ -347,10 +347,34 @@ async function fetchXmlViaBrowser(url, context) {
         });
         if (response.ok()) {
             const text = await response.text();
-            return extractXmlPayload(text);
+            const payload = extractXmlPayload(text);
+            if (payload.includes('<urlset') || payload.includes('<rss') || payload.includes('<sitemapindex') || payload.includes('<feed')) {
+                return payload;
+            }
         }
     } catch (e) {
         console.warn(`  [!] Browser XML fetch failed: ${e.message.split('\n')[0]}`);
+    }
+
+    const page = await context.newPage();
+    try {
+        await page.goto(url, { waitUntil: 'networkidle', timeout: 45000 });
+        await page.waitForTimeout(1200);
+        const raw = await page.evaluate(() => {
+            const pre = document.querySelector('pre');
+            if (pre && pre.innerText) {
+                return pre.innerText;
+            }
+            return document.documentElement.innerText || '';
+        });
+        const payload = extractXmlPayload(raw);
+        if (payload && (payload.includes('<urlset') || payload.includes('<rss') || payload.includes('<sitemapindex') || payload.includes('<feed'))) {
+            return payload;
+        }
+    } catch (e) {
+        console.warn(`  [!] Browser XML page fallback failed: ${e.message.split('\n')[0]}`);
+    } finally {
+        await page.close().catch(() => {});
     }
     return null;
 }
@@ -489,7 +513,12 @@ async function resolveFinalUrl(url) {
 }
 
 async function resolveBhwRssUrl(defaultUrl, context) {
-    const forumBase = 'https://www.blackhatworld.com/forums/hire-a-freelancer/';
+    const baseFromDefault = (defaultUrl || '').replace(/index\.rss.*$/i, '');
+    const forumBase = baseFromDefault || 'https://www.blackhatworld.com/forums/hire-a-freelancer.77/';
+
+    if (defaultUrl && defaultUrl.includes('.77/index.rss')) {
+        return defaultUrl;
+    }
 
     if (context) {
         const page = await context.newPage();
@@ -748,6 +777,7 @@ async function collectLinksFromPage(context, url, options) {
     const titleSelector = opts.titleSelector || '';
     const prefixSelector = opts.prefixSelector || '';
     const forumSelector = opts.forumSelector || '';
+    const r10Fallback = /r10\.net\/search\.php\?do=getnew/i.test(url);
 
     const page = await context.newPage();
     try {
@@ -755,7 +785,11 @@ async function collectLinksFromPage(context, url, options) {
         await page.waitForTimeout(1200);
 
         const waitTarget = itemSelector || linkSelector || 'a';
-        await waitForAnySelector(page, waitTarget, 12000);
+        let found = await waitForAnySelector(page, waitTarget, 12000);
+        if (!found) {
+            await page.waitForLoadState('networkidle', { timeout: 12000 }).catch(() => {});
+            found = await waitForAnySelector(page, waitTarget, 8000);
+        }
 
         const links = await page.evaluate((params) => {
             const {
@@ -763,7 +797,8 @@ async function collectLinksFromPage(context, url, options) {
                 linkSelector,
                 titleSelector,
                 prefixSelector,
-                forumSelector
+                forumSelector,
+                r10Fallback
             } = params;
 
             if (itemSelector) {
@@ -779,17 +814,39 @@ async function collectLinksFromPage(context, url, options) {
                 });
             }
 
+            let fallbackLinks = [];
             const nodes = document.querySelectorAll(linkSelector || 'a');
-            return Array.from(nodes).map((el) => ({
+            fallbackLinks = Array.from(nodes).map((el) => ({
                 title: (el.innerText || '').trim(),
                 url: el.getAttribute('href') || el.href || ''
             }));
+
+            if (r10Fallback) {
+                const anchors = document.querySelectorAll('a[id^="thread_title_"]');
+                const r10Links = Array.from(anchors).map((el) => {
+                    const item = el.closest('li.thread') || el.closest('li');
+                    const prefix = item ? (item.querySelector('.title .prefix')?.innerText || '').trim() : '';
+                    const forum = item ? (item.querySelector('.forum a')?.innerText || '').trim() : '';
+                    return {
+                        title: (el.innerText || '').trim(),
+                        url: el.getAttribute('href') || el.href || '',
+                        prefix,
+                        forum
+                    };
+                });
+                if (r10Links.length > 0) {
+                    return r10Links;
+                }
+            }
+
+            return fallbackLinks;
         }, {
             itemSelector,
             linkSelector,
             titleSelector,
             prefixSelector,
-            forumSelector
+            forumSelector,
+            r10Fallback
         });
 
         return links;
@@ -980,11 +1037,16 @@ async function scrape() {
             try {
                 await mainPage.waitForSelector(source.containerSelector, { timeout: 10000 });
             } catch (e) {
-                console.warn(`[${source.name}] Container not found, trying alternate approach...`);
-                // Save debug info
-                const content = await mainPage.content();
-                require('fs').writeFileSync(`debug_${safeName}.html`, content);
-                await mainPage.screenshot({ path: `debug_${safeName}.png`, fullPage: true });
+                await mainPage.waitForLoadState('networkidle', { timeout: 12000 }).catch(() => {});
+                try {
+                    await mainPage.waitForSelector(source.containerSelector, { timeout: 8000 });
+                } catch {
+                    console.warn(`[${source.name}] Container not found, trying alternate approach...`);
+                    // Save debug info
+                    const content = await mainPage.content();
+                    require('fs').writeFileSync(`debug_${safeName}.html`, content);
+                    await mainPage.screenshot({ path: `debug_${safeName}.png`, fullPage: true });
+                }
             }
 
             // Get thread links from homepage
