@@ -9,7 +9,7 @@ const WEBHOOK_URL = process.env.WEBHOOK_URL;
 const SCRAPER_TOKEN = process.env.SCRAPER_TOKEN;
 
 const MAX_THREADS_PER_SOURCE = 15;
-const MIN_CONTENT_LENGTH = 20;
+const MIN_CONTENT_LENGTH = 80;
 const MAX_CONTENT_LENGTH = 4000;
 
 const DEFAULT_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36';
@@ -184,24 +184,24 @@ const FEED_SOURCES = [
         name: 'r10-getnew',
         type: 'html',
         url: 'https://www.r10.net/search.php?do=getnew',
-        itemSelector: '.threadList.search li.thread.forumInfo',
+        itemSelector: '.threadList.search li.thread',
         titleSelector: '.title a',
         prefixSelector: '.title .prefix',
         forumSelector: '.forum a',
         contentSelector: CONTENT_SELECTORS.r10,
         emitAs: 'r10',
         prefilter: 'smart',
-        maxThreads: 20
+        maxThreads: 40
     },
     {
         name: 'r10-sitemap',
         type: 'sitemap',
-        url: 'view-source:https://www.r10.net/sitemap.xml',
+        url: 'https://www.r10.net/sitemap.xml',
         contentSelector: CONTENT_SELECTORS.r10,
         emitAs: 'r10',
         prefilter: 'smart',
         maxThreads: 30,
-        maxItems: 30
+        maxItems: 120
     },
     {
         name: 'wmaraci-sitemap',
@@ -211,7 +211,7 @@ const FEED_SOURCES = [
         emitAs: 'wmaraci',
         prefilter: 'smart',
         maxThreads: 30,
-        maxItems: 20
+        maxItems: 120
     },
     {
         name: 'bhw-rss',
@@ -222,7 +222,7 @@ const FEED_SOURCES = [
         resolveUrl: resolveBhwRssUrl,
         prefilter: 'title',
         maxThreads: 15,
-        maxItems: 20
+        maxItems: 60
     }
 ];
 
