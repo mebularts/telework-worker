@@ -133,7 +133,7 @@ const SOURCES = [
     {
         name: 'bhw',
         url: 'https://www.blackhatworld.com/',
-        containerSelector: '.p-body',
+        containerSelector: '.p-body, .block-body, structItemContainer',
         threadSelector: '.structItem--thread .structItem-title a, .block-row .contentRow-title a',
         contentSelector: '.message-body .bbWrapper, .message-content .bbWrapper, article .bbWrapper'
     }
