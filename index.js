@@ -1,5 +1,8 @@
 const { chromium } = require('playwright-extra');
 const stealth = require('puppeteer-extra-plugin-stealth')();
+
+const fs = require('fs');
+const path = require('path');
 chromium.use(stealth);
 
 const axios = require('axios');
@@ -22,6 +25,11 @@ const XML_PARSER = new XMLParser({
 });
 
 const SEEN_URLS = new Set();
+
+const COOKIE_ENV_KEY = 'SCRAPER_COOKIES_JSON';
+const COOKIE_ENV_KEY_ALT = 'SCRAPER_COOKIES';
+const COOKIE_FILES_ENV = 'SCRAPER_COOKIES_FILES';
+const COOKIE_FILES_ENV_ALT = 'SCRAPER_COOKIES_FILE';
 
 const JOB_URL_HINTS = [
     '/is-ilan', '/is-ilani', '/is-ilanlari',
@@ -158,9 +166,9 @@ const CONTENT_SELECTORS = {
 const SOURCES = [
     {
         name: 'r10',
-        url: 'https://www.r10.net/search.php?do=getnew',
-        containerSelector: '.threadList.search',
-        threadSelector: 'a[id^="thread_title_"]',
+        url: 'https://www.r10.net/',
+        containerSelector: '#tab-sonAcilan, #tab-sonAcilan .list, #tab-sonAcilan .list ul',
+        threadSelector: '#tab-sonAcilan .list ul li.thread .title a, #tab-sonAcilan a[id^="thread_title_"], a[id^="thread_title_"]',
         contentSelector: CONTENT_SELECTORS.r10
     },
     {
@@ -172,7 +180,7 @@ const SOURCES = [
     },
     {
         name: 'bhw',
-        url: 'https://www.blackhatworld.com/forums/hire-a-freelancer.77/',
+        url: 'https://www.blackhatworld.com/forums/hire-a-freelancer.76/',
         containerSelector: '.structItemContainer, .p-body',
         threadSelector: '.structItem-title a, .block-row .contentRow-title a',
         contentSelector: CONTENT_SELECTORS.bhw
@@ -196,7 +204,8 @@ const FEED_SOURCES = [
     {
         name: 'r10-sitemap',
         type: 'sitemap',
-        url: 'https://www.r10.net/sitemap.xml',
+        url: 'view-source:https://www.r10.net/sitemap.xml',
+        allowViewSource: true,
         contentSelector: CONTENT_SELECTORS.r10,
         emitAs: 'r10',
         prefilter: 'smart',
@@ -216,7 +225,7 @@ const FEED_SOURCES = [
     {
         name: 'bhw-rss',
         type: 'rss',
-        url: 'https://www.blackhatworld.com/forums/hire-a-freelancer.77/index.rss',
+        url: 'https://www.blackhatworld.com/forums/hire-a-freelancer.76/index.rss',
         contentSelector: CONTENT_SELECTORS.bhw,
         emitAs: 'bhw',
         resolveUrl: resolveBhwRssUrl,
@@ -252,10 +261,112 @@ function toArray(value) {
     return Array.isArray(value) ? value : [value];
 }
 
-function sanitizeFeedUrl(url) {
+function parseCookieEnv(raw) {
+    if (!raw) return [];
+    let text = raw.trim();
+    if (!text) return [];
+
+    if (text.startsWith('base64:')) {
+        const b64 = text.slice('base64:'.length);
+        try {
+            text = Buffer.from(b64, 'base64').toString('utf8');
+        } catch {
+            return [];
+        }
+    }
+
+    try {
+        const parsed = JSON.parse(text);
+        if (Array.isArray(parsed)) return parsed;
+        if (parsed && Array.isArray(parsed.cookies)) return parsed.cookies;
+        return [];
+    } catch {
+        return [];
+    }
+}
+
+function parseCookieFilesEnv(raw) {
+    if (!raw) return [];
+    return raw
+        .split(',')
+        .map(s => s.trim())
+        .filter(Boolean);
+}
+
+function readCookiesFromFile(filePath) {
+    try {
+        const resolved = path.resolve(filePath);
+        if (!fs.existsSync(resolved)) return [];
+        let text = fs.readFileSync(resolved, 'utf8').trim();
+        if (!text) return [];
+
+        if (text.startsWith('base64:')) {
+            text = Buffer.from(text.slice('base64:'.length), 'base64').toString('utf8');
+        }
+
+        const parsed = JSON.parse(text);
+        if (Array.isArray(parsed)) {
+            return parsed;
+        }
+        if (parsed && Array.isArray(parsed.cookies)) {
+            return parsed.cookies;
+        }
+    } catch {
+        return [];
+    }
+    return [];
+}
+
+function normalizeCookie(cookie) {
+    const c = { ...cookie };
+    if (c.expirationDate && !c.expires) {
+        c.expires = c.expirationDate;
+        delete c.expirationDate;
+    }
+    if (c.sameSite) {
+        const map = {
+            lax: 'Lax',
+            strict: 'Strict',
+            none: 'None'
+        };
+        const key = String(c.sameSite).toLowerCase();
+        c.sameSite = map[key] || c.sameSite;
+    }
+    return c;
+}
+
+async function applyCookiesFromEnv(context) {
+    const raw = process.env[COOKIE_ENV_KEY] || process.env[COOKIE_ENV_KEY_ALT];
+    const cookies = parseCookieEnv(raw).map(normalizeCookie);
+
+    const fileList = parseCookieFilesEnv(process.env[COOKIE_FILES_ENV] || process.env[COOKIE_FILES_ENV_ALT]);
+    for (const filePath of fileList) {
+        cookies.push(...readCookiesFromFile(filePath).map(normalizeCookie));
+    }
+
+    const deduped = new Map();
+    for (const c of cookies) {
+        if (!c || !c.name || !c.value || !c.domain) continue;
+        const key = `${c.name}|${c.domain}|${c.path || '/'}`;
+        deduped.set(key, c);
+    }
+
+    const finalCookies = Array.from(deduped.values());
+    if (finalCookies.length === 0) {
+        return;
+    }
+    try {
+        await context.addCookies(finalCookies);
+        console.log(`[cookies] Loaded ${finalCookies.length} cookies`);
+    } catch (e) {
+        console.warn(`[cookies] Failed to apply cookies: ${e.message.split('\n')[0]}`);
+    }
+}
+
+function sanitizeFeedUrl(url, preserveViewSource = false) {
     if (!url) return '';
     let cleaned = url.trim();
-    if (cleaned.startsWith('view-source:')) {
+    if (!preserveViewSource && cleaned.startsWith('view-source:')) {
         cleaned = cleaned.replace(/^view-source:/i, '');
     }
     return cleaned;
@@ -380,6 +491,9 @@ async function fetchXmlViaBrowser(url, context) {
 }
 
 async function fetchXml(url, context) {
+    if (url && url.startsWith('view-source:')) {
+        return await fetchXmlViaBrowser(url, context);
+    }
     try {
         const response = await axios.get(url, {
             timeout: 30000,
@@ -514,9 +628,9 @@ async function resolveFinalUrl(url) {
 
 async function resolveBhwRssUrl(defaultUrl, context) {
     const baseFromDefault = (defaultUrl || '').replace(/index\.rss.*$/i, '');
-    const forumBase = baseFromDefault || 'https://www.blackhatworld.com/forums/hire-a-freelancer.77/';
+    const forumBase = baseFromDefault || 'https://www.blackhatworld.com/forums/hire-a-freelancer.76/';
 
-    if (defaultUrl && defaultUrl.includes('.77/index.rss')) {
+    if (defaultUrl && defaultUrl.includes('.76/index.rss')) {
         return defaultUrl;
     }
 
@@ -954,14 +1068,17 @@ async function processFeedSource(feed, context) {
     let threads = [];
 
     if (feed.type === 'rss') {
-        const feedUrl = sanitizeFeedUrl(feed.resolveUrl ? await feed.resolveUrl(feed.url, context) : feed.url);
+        const feedUrl = sanitizeFeedUrl(
+            feed.resolveUrl ? await feed.resolveUrl(feed.url, context) : feed.url,
+            feed.allowViewSource
+        );
         console.log(`Fetching RSS: ${feedUrl}`);
         const xml = await fetchXml(feedUrl, context);
         if (!xml) return;
         threads = extractRssItems(xml, feed.maxItems || 60);
         threads = cleanThreadList(threads, feedUrl);
     } else if (feed.type === 'sitemap') {
-        const sitemapUrl = sanitizeFeedUrl(feed.url);
+        const sitemapUrl = sanitizeFeedUrl(feed.url, feed.allowViewSource);
         console.log(`Fetching Sitemap: ${sitemapUrl}`);
         const urls = await fetchSitemapUrls(sitemapUrl, feed.maxItems || 60, 0, context);
         const filtered = feed.urlAllow
@@ -1011,6 +1128,7 @@ async function scrape() {
             'Accept-Language': 'tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7'
         }
     });
+    await applyCookiesFromEnv(context);
     context.setDefaultTimeout(30000);
     context.setDefaultNavigationTimeout(45000);
 
@@ -1033,6 +1151,16 @@ async function scrape() {
 
             const safeName = source.name.replace(/[^a-z0-9]/gi, '_').toLowerCase();
             await mainPage.screenshot({ path: `nav_${safeName}.png`, fullPage: false });
+
+            if (source.name === 'r10') {
+                await mainPage.evaluate(() => {
+                    const tab = document.querySelector('a[href="#tab-sonAcilan"]');
+                    if (tab) {
+                        tab.click();
+                    }
+                });
+                await mainPage.waitForTimeout(800);
+            }
 
             try {
                 await mainPage.waitForSelector(source.containerSelector, { timeout: 10000 });
