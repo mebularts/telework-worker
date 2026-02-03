@@ -149,7 +149,7 @@ const SOURCES = [
     },
     {
         name: 'bhw',
-        url: 'https://www.blackhatworld.com/forums/hire-a-freelancer/',
+        url: 'https://www.blackhatworld.com/',
         containerSelector: '.p-body',
         threadSelector: '.structItem--thread .structItem-title a, .block-row .contentRow-title a',
         contentSelector: CONTENT_SELECTORS.bhw
@@ -169,7 +169,7 @@ const FEED_SOURCES = [
     {
         name: 'r10-sitemap',
         type: 'sitemap',
-        url: 'https://www.r10.net/sitemap.xml',
+        url: 'view-source:https://www.r10.net/sitemap.xml',
         contentSelector: CONTENT_SELECTORS.r10,
         emitAs: 'r10',
         prefilter: 'none',
