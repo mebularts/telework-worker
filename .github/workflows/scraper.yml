@@ -27,6 +27,7 @@ jobs:
         env:
           WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
           SCRAPER_TOKEN: ${{ secrets.SCRAPER_TOKEN }}
+          SCRAPER_COOKIES_JSON: ${{ secrets.SCRAPER_COOKIES_JSON }}
 
       - name: Upload Debug Artifacts
         if: always()
