@@ -2,43 +2,28 @@ name: High Frequency Scraper
 
 on:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: '*/5 * * * *' # Maksimum GitHub frekansı (5 dakika)
   workflow_dispatch:
-
-concurrency:
-  group: scraper-${{ github.ref }}
-  cancel-in-progress: true
 
 jobs:
   scrape:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
+      
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
-          cache: "npm" # setup-node npm cache desteği :contentReference[oaicite:5]{index=5}
-
-      - name: Cache Playwright browsers
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/ms-playwright
-          key: ${{ runner.os }}-playwright-${{ hashFiles('package-lock.json') }}
-          restore-keys: |
-            ${{ runner.os }}-playwright-
-
+          node-version: '20'
+          
       - name: Install dependencies
-        run: npm ci
-
-      - name: Install Playwright Chromium
-        run: npx playwright install --with-deps chromium
-
+        run: |
+          npm install
+          npx playwright install chromium
+          
       - name: Run Scraper
-        run: node index.js
+        run: |
+          node index.js
         env:
           WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
           SCRAPER_TOKEN: ${{ secrets.SCRAPER_TOKEN }}
