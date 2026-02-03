@@ -15,6 +15,7 @@ const MAX_CONTENT_LENGTH = 4000;
 const DEFAULT_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36';
 const XML_PARSER = new XMLParser({
     ignoreAttributes: false,
+    removeNSPrefix: true,
     attributeNamePrefix: '',
     textNodeName: 'text',
     trimValues: true
@@ -45,6 +46,17 @@ const JOB_POSITIVE_STRONG_PATTERNS = [
     /\balinacak\b/i,
     /\balinacaktir\b/i,
     /\balinir\b/i,
+    /\bsatin alinacak\b/i,
+    /\bsatin alinacaktir\b/i,
+    /\bsatin alinir\b/i,
+    /\bsatin almak istiyorum\b/i,
+    /\bsatin almak istiyoruz\b/i,
+    /\balim yapilacak\b/i,
+    /\balim yapilacaktir\b/i,
+    /\balim istiyorum\b/i,
+    /\barayis\b/i,
+    /\bteklif bekliyorum\b/i,
+    /\bteklif bekliyoruz\b/i,
     /\balici\b/i,
     /\balim\b/i,
     /\bihtiyac\b/i,
@@ -102,24 +114,35 @@ const JOB_NEGATIVE_STRONG_PATTERNS = [
     /\bsatma\b/i,
     /\bbozum\b/i,
     /\bbozdur\b/i,
-    /\bbozdurma\b/i
+    /\bbozdurma\b/i,
+    /\breklam\b/i,
+    /\btanitim\b/i,
+    /\bkampanya\b/i,
+    /\bindirim\b/i,
+    /\bfirsat\b/i,
+    /\bpaket\b/i,
+    /\bbayilik\b/i,
+    /\bkupon\b/i,
+    /\bpromosyon\b/i,
+    /\bhediye\b/i,
+    /\bgaranti\b/i,
+    /\bgarantili\b/i,
+    /\bstok\b/i,
+    /\btoplu\b/i,
+    /\bsponsor\b/i
 ];
 
 const JOB_NEGATIVE_WEAK_PATTERNS = [
-    /\bpaket\b/i,
-    /\bfirsat\b/i,
-    /\bkampanya\b/i,
-    /\bindirim\b/i,
     /\bpromo\b/i,
-    /\bpromosyon\b/i,
-    /\bkupon\b/i,
-    /\bhediye\b/i,
     /\bpremium\b/i,
     /\blisans\b/i,
     /\btoken\b/i,
     /\bkod\b/i,
     /\bservis\b/i,
-    /\bhizmetleri\b/i
+    /\bhizmetleri\b/i,
+    /\bpanel\b/i,
+    /\bportfolyo\b/i,
+    /\breferans\b/i
 ];
 
 /**
@@ -161,20 +184,24 @@ const FEED_SOURCES = [
         name: 'r10-getnew',
         type: 'html',
         url: 'https://www.r10.net/search.php?do=getnew',
-        linkSelector: 'a',
+        itemSelector: '.threadList.search li.thread',
+        titleSelector: '.title a',
+        prefixSelector: '.title .prefix',
+        forumSelector: '.forum a',
         contentSelector: CONTENT_SELECTORS.r10,
         emitAs: 'r10',
-        prefilter: 'title'
+        prefilter: 'smart',
+        maxThreads: 40
     },
     {
         name: 'r10-sitemap',
         type: 'sitemap',
-        url: 'view-source:https://www.r10.net/sitemap.xml',
+        url: 'https://www.r10.net/sitemap.xml',
         contentSelector: CONTENT_SELECTORS.r10,
         emitAs: 'r10',
-        prefilter: 'none',
-        maxThreads: 10,
-        urlAllow: [/r10\.net\/.+/i]
+        prefilter: 'smart',
+        maxThreads: 30,
+        maxItems: 120
     },
     {
         name: 'wmaraci-sitemap',
@@ -182,9 +209,9 @@ const FEED_SOURCES = [
         url: 'https://wmaraci.com/sitemap/forum.xml',
         contentSelector: CONTENT_SELECTORS.wmaraci,
         emitAs: 'wmaraci',
-        prefilter: 'none',
-        maxThreads: 10,
-        urlAllow: [/wmaraci\.com\/forum\//i]
+        prefilter: 'smart',
+        maxThreads: 30,
+        maxItems: 120
     },
     {
         name: 'bhw-rss',
@@ -194,7 +221,8 @@ const FEED_SOURCES = [
         emitAs: 'bhw',
         resolveUrl: resolveBhwRssUrl,
         prefilter: 'title',
-        maxThreads: 15
+        maxThreads: 15,
+        maxItems: 60
     }
 ];
 
@@ -222,6 +250,15 @@ function countMatches(patterns, text) {
 function toArray(value) {
     if (!value) return [];
     return Array.isArray(value) ? value : [value];
+}
+
+function sanitizeFeedUrl(url) {
+    if (!url) return '';
+    let cleaned = url.trim();
+    if (cleaned.startsWith('view-source:')) {
+        cleaned = cleaned.replace(/^view-source:/i, '');
+    }
+    return cleaned;
 }
 
 function normalizeThreadUrl(url) {
@@ -268,6 +305,7 @@ function cleanThreadList(threads, baseUrl) {
         seen.add(url);
 
         cleaned.push({
+            ...item,
             title: (item.title || '').trim(),
             url
         });
@@ -276,7 +314,48 @@ function cleanThreadList(threads, baseUrl) {
     return cleaned;
 }
 
-async function fetchXml(url) {
+function extractXmlPayload(text) {
+    if (!text) return '';
+    const markers = [
+        { open: '<rss', close: '</rss>' },
+        { open: '<urlset', close: '</urlset>' },
+        { open: '<sitemapindex', close: '</sitemapindex>' },
+        { open: '<feed', close: '</feed>' }
+    ];
+
+    for (const marker of markers) {
+        const start = text.indexOf(marker.open);
+        if (start === -1) continue;
+        const end = text.indexOf(marker.close, start);
+        if (end !== -1) {
+            return text.slice(start, end + marker.close.length);
+        }
+    }
+
+    return text;
+}
+
+async function fetchXmlViaBrowser(url, context) {
+    if (!context) return null;
+    try {
+        const response = await context.request.get(url, {
+            headers: {
+                'User-Agent': DEFAULT_UA,
+                'Accept': 'application/xml,text/xml,application/rss+xml,*/*'
+            },
+            timeout: 30000
+        });
+        if (response.ok()) {
+            const text = await response.text();
+            return extractXmlPayload(text);
+        }
+    } catch (e) {
+        console.warn(`  [!] Browser XML fetch failed: ${e.message.split('\n')[0]}`);
+    }
+    return null;
+}
+
+async function fetchXml(url, context) {
     try {
         const response = await axios.get(url, {
             timeout: 30000,
@@ -285,10 +364,11 @@ async function fetchXml(url) {
                 'Accept': 'application/xml,text/xml,application/rss+xml'
             }
         });
-        return typeof response.data === 'string' ? response.data : String(response.data);
+        const text = typeof response.data === 'string' ? response.data : String(response.data);
+        return extractXmlPayload(text);
     } catch (e) {
         console.warn(`  [!] XML fetch failed: ${url} -> ${e.message.split('\n')[0]}`);
-        return null;
+        return await fetchXmlViaBrowser(url, context);
     }
 }
 
@@ -351,7 +431,10 @@ function extractSitemapUrls(xmlText) {
         }
 
         if (parsed?.urlset?.url) {
-            const urls = toArray(parsed.urlset.url).map(u => u.loc || '').filter(Boolean);
+            const urls = toArray(parsed.urlset.url).map(u => ({
+                loc: u.loc || '',
+                lastmod: u.lastmod || ''
+            }));
             return { type: 'urlset', urls };
         }
     } catch (e) {
@@ -361,9 +444,9 @@ function extractSitemapUrls(xmlText) {
     return { type: 'unknown', urls: [] };
 }
 
-async function fetchSitemapUrls(url, maxUrls = 50, depth = 0) {
+async function fetchSitemapUrls(url, maxUrls = 50, depth = 0, context = null) {
     if (depth > 2) return [];
-    const xml = await fetchXml(url);
+    const xml = await fetchXml(url, context);
     if (!xml) return [];
 
     const parsed = extractSitemapUrls(xml);
@@ -374,7 +457,7 @@ async function fetchSitemapUrls(url, maxUrls = 50, depth = 0) {
         const pick = sorted.length > 0 ? sorted.slice(0, 3) : [];
         let urls = [];
         for (const sm of pick) {
-            const childUrls = await fetchSitemapUrls(sm.loc, maxUrls - urls.length, depth + 1);
+            const childUrls = await fetchSitemapUrls(sm.loc, maxUrls - urls.length, depth + 1, context);
             urls = urls.concat(childUrls);
             if (urls.length >= maxUrls) break;
         }
@@ -382,7 +465,11 @@ async function fetchSitemapUrls(url, maxUrls = 50, depth = 0) {
     }
 
     if (parsed.type === 'urlset') {
-        return parsed.urls.slice(0, maxUrls);
+        const sorted = parsed.urls
+            .filter(u => u.loc)
+            .sort((a, b) => new Date(b.lastmod || 0) - new Date(a.lastmod || 0))
+            .map(u => u.loc);
+        return sorted.slice(0, maxUrls);
     }
 
     return [];
@@ -401,8 +488,32 @@ async function resolveFinalUrl(url) {
     }
 }
 
-async function resolveBhwRssUrl(defaultUrl) {
+async function resolveBhwRssUrl(defaultUrl, context) {
     const forumBase = 'https://www.blackhatworld.com/forums/hire-a-freelancer/';
+
+    if (context) {
+        const page = await context.newPage();
+        try {
+            await page.goto(forumBase, { waitUntil: 'domcontentloaded', timeout: 45000 });
+            await page.waitForTimeout(1500);
+
+            const rssHref = await page.evaluate(() => {
+                const link = document.querySelector('link[rel="alternate"][type="application/rss+xml"]');
+                if (link && link.href) return link.href;
+                const alt = document.querySelector('a[href$="index.rss"]');
+                return alt ? alt.href : '';
+            });
+
+            if (rssHref) {
+                return rssHref;
+            }
+        } catch {
+            // ignore, fallback below
+        } finally {
+            await page.close().catch(() => {});
+        }
+    }
+
     const finalForumUrl = await resolveFinalUrl(forumBase);
     if (!finalForumUrl) return defaultUrl;
 
@@ -414,8 +525,8 @@ async function resolveBhwRssUrl(defaultUrl) {
     return `${normalized}index.rss`;
 }
 
-function isJobTopic({ title, content, url }) {
-    const combined = [title, content, url].filter(Boolean).join(' ');
+function analyzeJobSignals({ title, content, url, prefix, forum }) {
+    const combined = [title, content, url, prefix, forum].filter(Boolean).join(' ');
     const normalized = normalizeText(combined);
 
     const urlHit = JOB_URL_HINTS.some(hint => normalized.includes(hint));
@@ -425,24 +536,87 @@ function isJobTopic({ title, content, url }) {
     const negWeak = countMatches(JOB_NEGATIVE_WEAK_PATTERNS, normalized);
 
     const hasCurrency = /(?:\u20BA|\$|\u20AC|\btl\b|\btry\b|\busd\b|\beur\b|\bgbp\b)/i.test(combined);
-    const hasContact = /\b(?:pm|dm|whatsapp|telegram|tel|telefon|iletisim)\b/i.test(normalized);
+    const hasContact = /\b(?:pm|dm|whatsapp|telegram|tel|telefon|iletisim|contact)\b/i.test(normalized);
 
-    if (posStrong > 0) {
-        return { isJob: true, reason: `posStrong:${posStrong}` };
+    const prefixNorm = normalizeText(prefix || '');
+    const prefixDemand = /(alim|talep|aran|arayis|ihtiyac|istek|acil)/.test(prefixNorm);
+    const prefixSupply = /(satis|satilik|hizmet|reklam|tanitim|kampanya|paket|sponsor|ilan)/.test(prefixNorm);
+
+    return {
+        combined,
+        normalized,
+        urlHit,
+        posStrong,
+        posWeak,
+        negStrong,
+        negWeak,
+        hasCurrency,
+        hasContact,
+        prefixDemand,
+        prefixSupply
+    };
+}
+
+function isJobTopic({ title, content, url, prefix, forum }) {
+    const s = analyzeJobSignals({ title, content, url, prefix, forum });
+
+    const demandScore = s.posStrong + (s.prefixDemand ? 1 : 0);
+    const supplyScore = s.negStrong + (s.prefixSupply ? 1 : 0);
+
+    if (supplyScore > 0 && demandScore === 0) {
+        return {
+            isJob: false,
+            reason: `supply:${supplyScore},demand:${demandScore}`
+        };
     }
 
-    if (urlHit && negStrong === 0) {
-        return { isJob: true, reason: 'url' };
+    if (demandScore > 0 && supplyScore === 0) {
+        return {
+            isJob: true,
+            reason: `demand:${demandScore}`
+        };
     }
 
-    if (posWeak > 0 && negStrong === 0 && (hasCurrency || hasContact)) {
-        return { isJob: true, reason: `posWeak:${posWeak}` };
+    if (demandScore > 0 && supplyScore > 0) {
+        const isJob = demandScore >= supplyScore + 1 || s.posStrong >= 2;
+        return {
+            isJob,
+            reason: `mixed: demand:${demandScore},supply:${supplyScore}`
+        };
+    }
+
+    if (s.posWeak >= 2 && (s.hasCurrency || s.hasContact) && s.negStrong === 0 && s.negWeak <= 1) {
+        return { isJob: true, reason: `posWeak:${s.posWeak}` };
+    }
+
+    if (s.posWeak >= 1 && s.urlHit && s.negStrong === 0 && s.negWeak === 0) {
+        return { isJob: true, reason: `url+posWeak:${s.posWeak}` };
     }
 
     return {
         isJob: false,
-        reason: `negStrong:${negStrong},negWeak:${negWeak},posStrong:${posStrong},posWeak:${posWeak}`
+        reason: `negStrong:${s.negStrong},negWeak:${s.negWeak},posStrong:${s.posStrong},posWeak:${s.posWeak}`
     };
+}
+
+function shouldPrefilterSkip({ title, url, prefix, forum }) {
+    const s = analyzeJobSignals({ title, content: '', url, prefix, forum });
+    const demandScore = s.posStrong + (s.prefixDemand ? 1 : 0);
+    const supplyScore = s.negStrong + (s.prefixSupply ? 1 : 0);
+
+    if (demandScore > 0) {
+        return false;
+    }
+
+    if (supplyScore > 0) {
+        return true;
+    }
+
+    if (s.negWeak >= 2 && s.posWeak === 0) {
+        return true;
+    }
+
+    return false;
 }
 
 async function waitForAnySelector(page, selectorList, timeoutMs) {
@@ -567,19 +741,56 @@ async function fetchThreadDetails(context, url, contentSelector, titleSelector) 
     }
 }
 
-async function collectLinksFromPage(context, url, linkSelector) {
+async function collectLinksFromPage(context, url, options) {
+    const opts = typeof options === 'string' ? { linkSelector: options } : (options || {});
+    const itemSelector = opts.itemSelector || '';
+    const linkSelector = opts.linkSelector || opts.titleSelector || 'a';
+    const titleSelector = opts.titleSelector || '';
+    const prefixSelector = opts.prefixSelector || '';
+    const forumSelector = opts.forumSelector || '';
+
     const page = await context.newPage();
     try {
         await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
         await page.waitForTimeout(1200);
 
-        const links = await page.evaluate((selector) => {
-            const nodes = document.querySelectorAll(selector || 'a');
+        const waitTarget = itemSelector || linkSelector || 'a';
+        await waitForAnySelector(page, waitTarget, 12000);
+
+        const links = await page.evaluate((params) => {
+            const {
+                itemSelector,
+                linkSelector,
+                titleSelector,
+                prefixSelector,
+                forumSelector
+            } = params;
+
+            if (itemSelector) {
+                const items = document.querySelectorAll(itemSelector);
+                return Array.from(items).map((item) => {
+                    const linkEl = item.querySelector(titleSelector || linkSelector || 'a');
+                    const title = linkEl ? (linkEl.innerText || '').trim() : '';
+                    const url = linkEl ? (linkEl.getAttribute('href') || linkEl.href || '') : '';
+                    const prefix = prefixSelector ? (item.querySelector(prefixSelector)?.innerText || '').trim() : '';
+                    const forum = forumSelector ? (item.querySelector(forumSelector)?.innerText || '').trim() : '';
+
+                    return { title, url, prefix, forum };
+                });
+            }
+
+            const nodes = document.querySelectorAll(linkSelector || 'a');
             return Array.from(nodes).map((el) => ({
                 title: (el.innerText || '').trim(),
                 url: el.getAttribute('href') || el.href || ''
             }));
-        }, linkSelector || 'a');
+        }, {
+            itemSelector,
+            linkSelector,
+            titleSelector,
+            prefixSelector,
+            forumSelector
+        });
 
         return links;
     } catch (e) {
@@ -592,7 +803,7 @@ async function collectLinksFromPage(context, url, linkSelector) {
 
 async function processThreadsForSource(source, threads, context) {
     const maxThreads = source.maxThreads || MAX_THREADS_PER_SOURCE;
-    const prefilterMode = source.prefilter || 'title';
+    const prefilterMode = source.prefilter || 'smart';
 
     const prefiltered = [];
     for (const thread of threads) {
@@ -601,9 +812,25 @@ async function processThreadsForSource(source, threads, context) {
             continue;
         }
 
-        if (prefilterMode !== 'none') {
-            const jobCheck = isJobTopic({ title: thread.title, content: '', url: thread.url });
+        if (prefilterMode === 'strict') {
+            const jobCheck = isJobTopic({
+                title: thread.title,
+                content: '',
+                url: thread.url,
+                prefix: thread.prefix,
+                forum: thread.forum
+            });
             if (!jobCheck.isJob) {
+                console.log(`  [SKIP:NOTJOB] ${(thread.title || thread.url).substring(0, 60)}...`);
+                continue;
+            }
+        } else if (prefilterMode === 'smart') {
+            if (shouldPrefilterSkip({
+                title: thread.title,
+                url: thread.url,
+                prefix: thread.prefix,
+                forum: thread.forum
+            })) {
                 console.log(`  [SKIP:NOTJOB] ${(thread.title || thread.url).substring(0, 60)}...`);
                 continue;
             }
@@ -633,7 +860,13 @@ async function processThreadsForSource(source, threads, context) {
         }
 
         if (content && content.length >= MIN_CONTENT_LENGTH) {
-            const jobCheck = isJobTopic({ title: finalTitle, content, url: thread.url });
+            const jobCheck = isJobTopic({
+                title: finalTitle,
+                content,
+                url: thread.url,
+                prefix: thread.prefix,
+                forum: thread.forum
+            });
             if (!jobCheck.isJob) {
                 console.log(`  [SKIP:NOTJOB] ${finalTitle.substring(0, 60)}...`);
                 continue;
@@ -664,23 +897,25 @@ async function processFeedSource(feed, context) {
     let threads = [];
 
     if (feed.type === 'rss') {
-        const feedUrl = feed.resolveUrl ? await feed.resolveUrl(feed.url) : feed.url;
+        const feedUrl = sanitizeFeedUrl(feed.resolveUrl ? await feed.resolveUrl(feed.url, context) : feed.url);
         console.log(`Fetching RSS: ${feedUrl}`);
-        const xml = await fetchXml(feedUrl);
+        const xml = await fetchXml(feedUrl, context);
         if (!xml) return;
         threads = extractRssItems(xml, feed.maxItems || 60);
         threads = cleanThreadList(threads, feedUrl);
     } else if (feed.type === 'sitemap') {
-        console.log(`Fetching Sitemap: ${feed.url}`);
-        const urls = await fetchSitemapUrls(feed.url, feed.maxItems || 60);
+        const sitemapUrl = sanitizeFeedUrl(feed.url);
+        console.log(`Fetching Sitemap: ${sitemapUrl}`);
+        const urls = await fetchSitemapUrls(sitemapUrl, feed.maxItems || 60, 0, context);
         const filtered = feed.urlAllow
             ? urls.filter(u => feed.urlAllow.some(r => r.test(u)))
             : urls;
-        threads = cleanThreadList(filtered.map(url => ({ title: '', url })), feed.url);
+        threads = cleanThreadList(filtered.map(url => ({ title: '', url })), sitemapUrl);
     } else if (feed.type === 'html') {
-        console.log(`Fetching HTML feed: ${feed.url}`);
-        const rawLinks = await collectLinksFromPage(context, feed.url, feed.linkSelector || 'a');
-        threads = cleanThreadList(rawLinks, feed.url);
+        const feedUrl = sanitizeFeedUrl(feed.url);
+        console.log(`Fetching HTML feed: ${feedUrl}`);
+        const rawLinks = await collectLinksFromPage(context, feedUrl, feed);
+        threads = cleanThreadList(rawLinks, feedUrl);
     }
 
     if (threads.length === 0) {
@@ -792,8 +1027,7 @@ async function scrape() {
                 if (SEEN_URLS.has(thread.url)) {
                     continue;
                 }
-                const jobCheck = isJobTopic({ title: thread.title, content: '', url: thread.url });
-                if (!jobCheck.isJob) {
+                if (shouldPrefilterSkip({ title: thread.title, url: thread.url })) {
                     console.log(`  [SKIP:NOTJOB] ${thread.title.substring(0, 60)}...`);
                     continue;
                 }
