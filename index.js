@@ -184,7 +184,7 @@ const FEED_SOURCES = [
         name: 'r10-getnew',
         type: 'html',
         url: 'https://www.r10.net/search.php?do=getnew',
-        itemSelector: '.threadList.search li.thread',
+        itemSelector: '.threadList.search li.thread.forumInfo',
         titleSelector: '.title a',
         prefixSelector: '.title .prefix',
         forumSelector: '.forum a',
