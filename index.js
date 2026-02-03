@@ -3,6 +3,7 @@ const stealth = require('puppeteer-extra-plugin-stealth')();
 chromium.use(stealth);
 
 const axios = require('axios');
+const { XMLParser } = require('fast-xml-parser');
 
 const WEBHOOK_URL = process.env.WEBHOOK_URL;
 const SCRAPER_TOKEN = process.env.SCRAPER_TOKEN;
@@ -10,6 +11,16 @@ const SCRAPER_TOKEN = process.env.SCRAPER_TOKEN;
 const MAX_THREADS_PER_SOURCE = 15;
 const MIN_CONTENT_LENGTH = 80;
 const MAX_CONTENT_LENGTH = 4000;
+
+const DEFAULT_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36';
+const XML_PARSER = new XMLParser({
+    ignoreAttributes: false,
+    attributeNamePrefix: '',
+    textNodeName: 'text',
+    trimValues: true
+});
+
+const SEEN_URLS = new Set();
 
 const JOB_URL_HINTS = [
     '/is-ilan', '/is-ilani', '/is-ilanlari',
@@ -115,27 +126,75 @@ const JOB_NEGATIVE_WEAK_PATTERNS = [
  * Full Content Mode: Fetches thread content for AI processing.
  * Uses separate browser contexts for each thread to avoid ERR_ABORTED.
  */
+const CONTENT_SELECTORS = {
+    r10: '.postContent.userMessageSize, .postContent, .postbody .content, .post_message, #post_message_, article .content',
+    wmaraci: '.message-body, .postMessage, .post-content, .forumPost .content',
+    bhw: '.message-body .bbWrapper, .message-content .bbWrapper, article .bbWrapper'
+};
+
 const SOURCES = [
     {
         name: 'r10',
         url: 'https://www.r10.net/',
         containerSelector: '#tab-sonAcilan .list ul',
         threadSelector: '#tab-sonAcilan .list ul li.thread .title a',
-        contentSelector: '.postContent.userMessageSize, .postContent, .postbody .content, .post_message, #post_message_, article .content'
+        contentSelector: CONTENT_SELECTORS.r10
     },
     {
         name: 'wmaraci',
         url: 'https://wmaraci.com/',
         containerSelector: '.forumLastSubject .content ul',
         threadSelector: '.forumLastSubject .content ul li.open span a[href*="/forum/"]',
-        contentSelector: '.message-body, .postMessage, .post-content, .forumPost .content'
+        contentSelector: CONTENT_SELECTORS.wmaraci
     },
     {
         name: 'bhw',
-        url: 'https://www.blackhatworld.com/',
-        containerSelector: '.p-body, .block-body, structItemContainer',
+        url: 'https://www.blackhatworld.com/forums/hire-a-freelancer/',
+        containerSelector: '.p-body',
         threadSelector: '.structItem--thread .structItem-title a, .block-row .contentRow-title a',
-        contentSelector: '.message-body .bbWrapper, .message-content .bbWrapper, article .bbWrapper'
+        contentSelector: CONTENT_SELECTORS.bhw
+    }
+];
+
+const FEED_SOURCES = [
+    {
+        name: 'r10-getnew',
+        type: 'html',
+        url: 'https://www.r10.net/search.php?do=getnew',
+        linkSelector: 'a',
+        contentSelector: CONTENT_SELECTORS.r10,
+        emitAs: 'r10',
+        prefilter: 'title'
+    },
+    {
+        name: 'r10-sitemap',
+        type: 'sitemap',
+        url: 'https://www.r10.net/sitemap.xml',
+        contentSelector: CONTENT_SELECTORS.r10,
+        emitAs: 'r10',
+        prefilter: 'none',
+        maxThreads: 10,
+        urlAllow: [/r10\.net\/.+/i]
+    },
+    {
+        name: 'wmaraci-sitemap',
+        type: 'sitemap',
+        url: 'https://wmaraci.com/sitemap/forum.xml',
+        contentSelector: CONTENT_SELECTORS.wmaraci,
+        emitAs: 'wmaraci',
+        prefilter: 'none',
+        maxThreads: 10,
+        urlAllow: [/wmaraci\.com\/forum\//i]
+    },
+    {
+        name: 'bhw-rss',
+        type: 'rss',
+        url: 'https://www.blackhatworld.com/forums/hire-a-freelancer.77/index.rss',
+        contentSelector: CONTENT_SELECTORS.bhw,
+        emitAs: 'bhw',
+        resolveUrl: resolveBhwRssUrl,
+        prefilter: 'title',
+        maxThreads: 15
     }
 ];
 
@@ -158,6 +217,201 @@ function countMatches(patterns, text) {
         }
     }
     return count;
+}
+
+function toArray(value) {
+    if (!value) return [];
+    return Array.isArray(value) ? value : [value];
+}
+
+function normalizeThreadUrl(url) {
+    if (!url) return '';
+    try {
+        const u = new URL(url);
+        u.hash = '';
+        u.search = '';
+        return u.toString();
+    } catch {
+        return url.split('#')[0].split('?')[0];
+    }
+}
+
+function isLikelyThreadUrl(url) {
+    if (!url) return false;
+    return (
+        url.includes('.html') ||
+        url.includes('/forum/') ||
+        url.includes('thread') ||
+        url.includes('konu') ||
+        url.includes('/threads/') ||
+        /\.\d+\/?$/.test(url)
+    );
+}
+
+function cleanThreadList(threads, baseUrl) {
+    const cleaned = [];
+    const seen = new Set();
+
+    for (const item of threads) {
+        let url = item.url || item.link || '';
+        if (!url) continue;
+        if (!url.startsWith('http')) {
+            try {
+                url = new URL(url, baseUrl).href;
+            } catch {
+                continue;
+            }
+        }
+        url = normalizeThreadUrl(url);
+        if (!isLikelyThreadUrl(url)) continue;
+        if (seen.has(url)) continue;
+        seen.add(url);
+
+        cleaned.push({
+            title: (item.title || '').trim(),
+            url
+        });
+    }
+
+    return cleaned;
+}
+
+async function fetchXml(url) {
+    try {
+        const response = await axios.get(url, {
+            timeout: 30000,
+            headers: {
+                'User-Agent': DEFAULT_UA,
+                'Accept': 'application/xml,text/xml,application/rss+xml'
+            }
+        });
+        return typeof response.data === 'string' ? response.data : String(response.data);
+    } catch (e) {
+        console.warn(`  [!] XML fetch failed: ${url} -> ${e.message.split('\n')[0]}`);
+        return null;
+    }
+}
+
+function extractRssItems(xmlText, maxItems = 50) {
+    try {
+        const parsed = XML_PARSER.parse(xmlText);
+        let items = [];
+
+        if (parsed?.rss?.channel?.item) {
+            items = toArray(parsed.rss.channel.item);
+        } else if (parsed?.feed?.entry) {
+            items = toArray(parsed.feed.entry);
+        }
+
+        const mapped = items.map((item) => {
+            const title = typeof item.title === 'object' ? (item.title.text || '') : (item.title || '');
+            let link = '';
+            if (typeof item.link === 'string') {
+                link = item.link;
+            } else if (Array.isArray(item.link)) {
+                for (const l of item.link) {
+                    if (typeof l === 'string') {
+                        link = l;
+                        break;
+                    }
+                    if (l && l.href) {
+                        link = l.href;
+                        break;
+                    }
+                }
+            } else if (item.link && item.link.href) {
+                link = item.link.href;
+            } else if (item.id) {
+                link = item.id;
+            }
+
+            return {
+                title: (title || '').trim(),
+                url: (link || '').trim()
+            };
+        });
+
+        return mapped.filter(item => item.url).slice(0, maxItems);
+    } catch (e) {
+        console.warn(`  [!] RSS parse failed: ${e.message.split('\n')[0]}`);
+        return [];
+    }
+}
+
+function extractSitemapUrls(xmlText) {
+    try {
+        const parsed = XML_PARSER.parse(xmlText);
+
+        if (parsed?.sitemapindex?.sitemap) {
+            const sitemaps = toArray(parsed.sitemapindex.sitemap).map(sm => ({
+                loc: sm.loc || '',
+                lastmod: sm.lastmod || ''
+            }));
+            return { type: 'index', sitemaps };
+        }
+
+        if (parsed?.urlset?.url) {
+            const urls = toArray(parsed.urlset.url).map(u => u.loc || '').filter(Boolean);
+            return { type: 'urlset', urls };
+        }
+    } catch (e) {
+        console.warn(`  [!] Sitemap parse failed: ${e.message.split('\n')[0]}`);
+    }
+
+    return { type: 'unknown', urls: [] };
+}
+
+async function fetchSitemapUrls(url, maxUrls = 50, depth = 0) {
+    if (depth > 2) return [];
+    const xml = await fetchXml(url);
+    if (!xml) return [];
+
+    const parsed = extractSitemapUrls(xml);
+    if (parsed.type === 'index') {
+        const sorted = parsed.sitemaps
+            .filter(sm => sm.loc)
+            .sort((a, b) => new Date(b.lastmod || 0) - new Date(a.lastmod || 0));
+        const pick = sorted.length > 0 ? sorted.slice(0, 3) : [];
+        let urls = [];
+        for (const sm of pick) {
+            const childUrls = await fetchSitemapUrls(sm.loc, maxUrls - urls.length, depth + 1);
+            urls = urls.concat(childUrls);
+            if (urls.length >= maxUrls) break;
+        }
+        return urls.slice(0, maxUrls);
+    }
+
+    if (parsed.type === 'urlset') {
+        return parsed.urls.slice(0, maxUrls);
+    }
+
+    return [];
+}
+
+async function resolveFinalUrl(url) {
+    try {
+        const response = await axios.get(url, {
+            maxRedirects: 5,
+            timeout: 20000,
+            headers: { 'User-Agent': DEFAULT_UA }
+        });
+        return response?.request?.res?.responseUrl || url;
+    } catch {
+        return url;
+    }
+}
+
+async function resolveBhwRssUrl(defaultUrl) {
+    const forumBase = 'https://www.blackhatworld.com/forums/hire-a-freelancer/';
+    const finalForumUrl = await resolveFinalUrl(forumBase);
+    if (!finalForumUrl) return defaultUrl;
+
+    if (finalForumUrl.includes('index.rss')) {
+        return finalForumUrl;
+    }
+
+    const normalized = finalForumUrl.endsWith('/') ? finalForumUrl : `${finalForumUrl}/`;
+    return `${normalized}index.rss`;
 }
 
 function isJobTopic({ title, content, url }) {
@@ -211,7 +465,7 @@ async function waitForAnySelector(page, selectorList, timeoutMs) {
     return null;
 }
 
-async function fetchThreadContent(context, url, contentSelector) {
+async function fetchThreadDetails(context, url, contentSelector, titleSelector) {
     const page = await context.newPage();
     try {
         await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
@@ -219,8 +473,12 @@ async function fetchThreadContent(context, url, contentSelector) {
 
         await waitForAnySelector(page, contentSelector, 8000);
 
-        const content = await page.evaluate(({ selector, minLen, maxLen }) => {
+        const details = await page.evaluate(({ selector, titleSelector, minLen, maxLen }) => {
             const selectors = selector.split(',').map(s => s.trim()).filter(Boolean);
+            const titleSelectors = (titleSelector || 'h1, .p-title-value, .thread-title, .title')
+                .split(',')
+                .map(s => s.trim())
+                .filter(Boolean);
 
             const cleanText = (el) => {
                 if (!el) return '';
@@ -267,23 +525,180 @@ async function fetchThreadContent(context, url, contentSelector) {
                 if (metaText) candidates.push({ text: metaText });
             }
 
-            if (candidates.length === 0) return null;
+            if (candidates.length === 0) {
+                return null;
+            }
 
             let best = candidates.find(c => c.text.length >= minLen);
             if (!best) {
                 best = candidates.reduce((a, b) => (b.text.length > a.text.length ? b : a), candidates[0]);
             }
 
-            const text = best.text;
-            return text.length > maxLen ? text.slice(0, maxLen) : text;
-        }, { selector: contentSelector, minLen: MIN_CONTENT_LENGTH, maxLen: MAX_CONTENT_LENGTH });
+            let pageTitle = '';
+            for (const sel of titleSelectors) {
+                const el = document.querySelector(sel);
+                if (el && el.innerText) {
+                    pageTitle = el.innerText.trim();
+                    break;
+                }
+            }
+            if (!pageTitle) {
+                pageTitle = (document.title || '').trim();
+            }
 
-        return content;
+            const text = best.text;
+            return {
+                content: text.length > maxLen ? text.slice(0, maxLen) : text,
+                title: pageTitle
+            };
+        }, {
+            selector: contentSelector,
+            titleSelector,
+            minLen: MIN_CONTENT_LENGTH,
+            maxLen: MAX_CONTENT_LENGTH
+        });
+
+        return details;
     } catch (e) {
         console.warn(`  [!] Fetch failed: ${e.message.split('\n')[0]}`);
         return null;
     } finally {
         await page.close();
+    }
+}
+
+async function collectLinksFromPage(context, url, linkSelector) {
+    const page = await context.newPage();
+    try {
+        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
+        await page.waitForTimeout(1200);
+
+        const links = await page.evaluate((selector) => {
+            const nodes = document.querySelectorAll(selector || 'a');
+            return Array.from(nodes).map((el) => ({
+                title: (el.innerText || '').trim(),
+                url: el.getAttribute('href') || el.href || ''
+            }));
+        }, linkSelector || 'a');
+
+        return links;
+    } catch (e) {
+        console.warn(`  [!] HTML feed failed: ${e.message.split('\n')[0]}`);
+        return [];
+    } finally {
+        await page.close();
+    }
+}
+
+async function processThreadsForSource(source, threads, context) {
+    const maxThreads = source.maxThreads || MAX_THREADS_PER_SOURCE;
+    const prefilterMode = source.prefilter || 'title';
+
+    const prefiltered = [];
+    for (const thread of threads) {
+        if (!thread.url) continue;
+        if (SEEN_URLS.has(thread.url)) {
+            continue;
+        }
+
+        if (prefilterMode !== 'none') {
+            const jobCheck = isJobTopic({ title: thread.title, content: '', url: thread.url });
+            if (!jobCheck.isJob) {
+                console.log(`  [SKIP:NOTJOB] ${(thread.title || thread.url).substring(0, 60)}...`);
+                continue;
+            }
+        }
+
+        prefiltered.push(thread);
+        SEEN_URLS.add(thread.url);
+
+        if (prefiltered.length >= maxThreads) {
+            break;
+        }
+    }
+
+    console.log(`Fetching content for ${prefiltered.length} topics...`);
+
+    const enrichedThreads = [];
+    for (const thread of prefiltered) {
+        await new Promise(resolve => setTimeout(resolve, 600));
+
+        const details = await fetchThreadDetails(context, thread.url, source.contentSelector, source.titleSelector);
+        const content = details?.content || '';
+        const finalTitle = (thread.title || '').trim() || (details?.title || '').trim();
+
+        if (!finalTitle) {
+            console.log(`  [SKIP:NOTITLE] ${thread.url.substring(0, 60)}...`);
+            continue;
+        }
+
+        if (content && content.length >= MIN_CONTENT_LENGTH) {
+            const jobCheck = isJobTopic({ title: finalTitle, content, url: thread.url });
+            if (!jobCheck.isJob) {
+                console.log(`  [SKIP:NOTJOB] ${finalTitle.substring(0, 60)}...`);
+                continue;
+            }
+            enrichedThreads.push({ ...thread, title: finalTitle, original_content: content });
+            console.log(`  [OK] ${finalTitle.substring(0, 60)}...`);
+        } else {
+            console.log(`  [SKIP:NOCONTENT] ${finalTitle.substring(0, 60)}...`);
+        }
+    }
+
+    if (enrichedThreads.length > 0) {
+        const sourceLabel = source.emitAs || source.name;
+        await axios.post(WEBHOOK_URL, {
+            type: 'external_crawl',
+            token: SCRAPER_TOKEN,
+            source: sourceLabel,
+            data: enrichedThreads
+        });
+        console.log(`Pushed ${enrichedThreads.length} items to webhook.`);
+    } else {
+        console.log('No items with content to push.');
+    }
+}
+
+async function processFeedSource(feed, context) {
+    console.log(`\n=== ${feed.name.toUpperCase()} ===`);
+    let threads = [];
+
+    if (feed.type === 'rss') {
+        const feedUrl = feed.resolveUrl ? await feed.resolveUrl(feed.url) : feed.url;
+        console.log(`Fetching RSS: ${feedUrl}`);
+        const xml = await fetchXml(feedUrl);
+        if (!xml) return;
+        threads = extractRssItems(xml, feed.maxItems || 60);
+        threads = cleanThreadList(threads, feedUrl);
+    } else if (feed.type === 'sitemap') {
+        console.log(`Fetching Sitemap: ${feed.url}`);
+        const urls = await fetchSitemapUrls(feed.url, feed.maxItems || 60);
+        const filtered = feed.urlAllow
+            ? urls.filter(u => feed.urlAllow.some(r => r.test(u)))
+            : urls;
+        threads = cleanThreadList(filtered.map(url => ({ title: '', url })), feed.url);
+    } else if (feed.type === 'html') {
+        console.log(`Fetching HTML feed: ${feed.url}`);
+        const rawLinks = await collectLinksFromPage(context, feed.url, feed.linkSelector || 'a');
+        threads = cleanThreadList(rawLinks, feed.url);
+    }
+
+    if (threads.length === 0) {
+        console.log('No threads found.');
+        return;
+    }
+
+    console.log(`Found ${threads.length} topics. Prefiltering...`);
+    await processThreadsForSource(feed, threads, context);
+}
+
+async function scrapeFeedSources(context) {
+    for (const feed of FEED_SOURCES) {
+        try {
+            await processFeedSource(feed, context);
+        } catch (error) {
+            console.error(`[${feed.name}] Feed Error:`, error.message.split('\n')[0]);
+        }
     }
 }
 
@@ -297,7 +712,7 @@ async function scrape() {
 
     const browser = await chromium.launch({ headless: true });
     const context = await browser.newContext({
-        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+        userAgent: DEFAULT_UA,
         viewport: { width: 1920, height: 1080 },
         locale: 'tr-TR',
         extraHTTPHeaders: {
@@ -338,7 +753,7 @@ async function scrape() {
             }
 
             // Get thread links from homepage
-            const threads = await mainPage.evaluate((s) => {
+            const rawThreads = await mainPage.evaluate((s) => {
                 const results = [];
                 const nodes = document.querySelectorAll(s.threadSelector);
 
@@ -367,17 +782,23 @@ async function scrape() {
                 return results.slice(0, 50);
             }, source);
 
+            const threads = cleanThreadList(rawThreads, source.url);
+
             console.log(`Found ${threads.length} topics. Prefiltering...`);
             await mainPage.close();
 
             const prefilteredThreads = [];
             for (const thread of threads) {
+                if (SEEN_URLS.has(thread.url)) {
+                    continue;
+                }
                 const jobCheck = isJobTopic({ title: thread.title, content: '', url: thread.url });
                 if (!jobCheck.isJob) {
                     console.log(`  [SKIP:NOTJOB] ${thread.title.substring(0, 60)}...`);
                     continue;
                 }
                 prefilteredThreads.push(thread);
+                SEEN_URLS.add(thread.url);
                 if (prefilteredThreads.length >= MAX_THREADS_PER_SOURCE) {
                     break;
                 }
@@ -391,15 +812,18 @@ async function scrape() {
                 // Add delay between requests
                 await new Promise(resolve => setTimeout(resolve, 600));
 
-                const content = await fetchThreadContent(context, thread.url, source.contentSelector);
+                const details = await fetchThreadDetails(context, thread.url, source.contentSelector, source.titleSelector);
+                const content = details?.content || '';
+                const finalTitle = (thread.title || '').trim() || (details?.title || '').trim();
+
                 if (content && content.length >= MIN_CONTENT_LENGTH) {
-                    const jobCheck = isJobTopic({ title: thread.title, content, url: thread.url });
+                    const jobCheck = isJobTopic({ title: finalTitle, content, url: thread.url });
                     if (!jobCheck.isJob) {
                         console.log(`  [SKIP:NOTJOB] ${thread.title.substring(0, 60)}...`);
                         continue;
                     }
-                    enrichedThreads.push({ ...thread, original_content: content });
-                    console.log(`  [OK] ${thread.title.substring(0, 60)}...`);
+                    enrichedThreads.push({ ...thread, title: finalTitle, original_content: content });
+                    console.log(`  [OK] ${finalTitle.substring(0, 60)}...`);
                 } else {
                     console.log(`  [SKIP:NOCONTENT] ${thread.title.substring(0, 60)}...`);
                 }
@@ -428,10 +852,10 @@ async function scrape() {
         }
     }
 
+    await scrapeFeedSources(context);
+
     await browser.close();
     console.log("\n=== Scrape finished ===");
 }
 
 scrape();
-
-
