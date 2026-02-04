@@ -26,6 +26,7 @@ const SCRAPER_TOKEN = process.env.SCRAPER_TOKEN;
 const MAX_THREADS_PER_SOURCE = 20;
 const MIN_CONTENT_LENGTH = 80;
 const MAX_CONTENT_LENGTH = 4000;
+const ALLOW_MARKETPLACE = process.env.SCRAPER_ALLOW_MARKETPLACE !== '0';
 
 const DEFAULT_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36';
 const XML_PARSER = new XMLParser({
@@ -237,38 +238,34 @@ const SOURCES = [
         url: 'https://www.r10.net/',
         containerSelector: '.thread, #tab-sonAcilan .list ul li.thread',
         threadSelector: '.thread .title a, #tab-sonAcilan .list ul li.thread .title a, a[id^="thread_title_"]',
-        contentSelector: CONTENT_SELECTORS.r10
+        contentSelector: CONTENT_SELECTORS.r10,
+        maxThreads: 20,
+        useScrapeDo: true,
+        useScrapeDoApi: false
     },
     {
         name: 'wmaraci',
         url: 'https://wmaraci.com/',
         containerSelector: '.forumLastSubject .content ul',
         threadSelector: '.forumLastSubject .content ul li.open span a[href*="/forum/"]',
-        contentSelector: CONTENT_SELECTORS.wmaraci
+        contentSelector: CONTENT_SELECTORS.wmaraci,
+        maxThreads: 20,
+        useScrapeDo: false,
+        useScrapeDoApi: false
     },
     {
         name: 'bhw',
         url: 'https://www.blackhatworld.com/forums/hire-a-freelancer.76/',
         containerSelector: '.structItem--thread, .structItem',
         threadSelector: '.structItem-title a, .block-row .contentRow-title a',
-        contentSelector: CONTENT_SELECTORS.bhw
+        contentSelector: CONTENT_SELECTORS.bhw,
+        maxThreads: 20,
+        useScrapeDo: true,
+        useScrapeDoApi: true
     }
 ];
 
 const FEED_SOURCES = [
-    {
-        name: 'r10-getnew',
-        type: 'html',
-        url: 'https://www.r10.net/search.php?do=getnew',
-        itemSelector: '.threadList.search li.thread',
-        titleSelector: '.title a',
-        prefixSelector: '.title .prefix',
-        forumSelector: '.forum a',
-        contentSelector: CONTENT_SELECTORS.r10,
-        emitAs: 'r10',
-        prefilter: 'smart',
-        maxThreads: 40
-    },
     {
         name: 'r10-sitemap',
         type: 'sitemap',
@@ -276,9 +273,10 @@ const FEED_SOURCES = [
         allowViewSource: true,
         contentSelector: CONTENT_SELECTORS.r10,
         emitAs: 'r10',
-        prefilter: 'smart',
-        maxThreads: 30,
-        maxItems: 120
+        prefilter: 'title',
+        maxThreads: 20,
+        maxItems: 20,
+        useScrapeDo: true
     },
     {
         name: 'wmaraci-sitemap',
@@ -286,9 +284,10 @@ const FEED_SOURCES = [
         url: 'https://wmaraci.com/sitemap/forum.xml',
         contentSelector: CONTENT_SELECTORS.wmaraci,
         emitAs: 'wmaraci',
-        prefilter: 'smart',
-        maxThreads: 30,
-        maxItems: 120
+        prefilter: 'title',
+        maxThreads: 20,
+        maxItems: 20,
+        useScrapeDo: false
     },
     {
         name: 'bhw-rss',
@@ -298,8 +297,9 @@ const FEED_SOURCES = [
         emitAs: 'bhw',
         resolveUrl: resolveBhwRssUrl,
         prefilter: 'title',
-        maxThreads: 15,
-        maxItems: 60
+        maxThreads: 20,
+        maxItems: 20,
+        useScrapeDo: true
     }
 ];
 
@@ -488,6 +488,29 @@ function isLikelyThreadUrl(url) {
     );
 }
 
+function deriveTitleFromUrl(url) {
+    if (!url) return '';
+    try {
+        const u = new URL(url);
+        let segment = u.pathname.split('/').filter(Boolean).pop() || '';
+        segment = segment.replace(/\.html?$/i, '');
+        segment = segment.replace(/-new-post$/i, '');
+        segment = segment.replace(/^\d+-/, '');
+        segment = segment.replace(/-\d+$/i, '');
+        segment = segment.replace(/[-_]+/g, ' ');
+        try {
+            segment = decodeURIComponent(segment);
+        } catch {
+            // ignore decoding issues
+        }
+        segment = segment.replace(/\s+/g, ' ').trim();
+        if (segment.length < 4) return '';
+        return segment;
+    } catch {
+        return '';
+    }
+}
+
 function cleanThreadList(threads, baseUrl) {
     const cleaned = [];
     const seen = new Set();
@@ -611,14 +634,15 @@ async function fetchXmlViaBrowser(url, context) {
     return null;
 }
 
-async function fetchXml(url, context) {
+async function fetchXml(url, context, options = {}) {
     const normalizedUrl = (url || '').trim();
+    const useScrapeDo = options.useScrapeDo ?? USE_SCRAPE_DO_API;
     if (normalizedUrl.toLowerCase().startsWith('view-source:')) {
         return await fetchXmlViaBrowser(normalizedUrl, context);
     }
 
     // Force browser for BHW RSS which consistently blocks axios (UNLESS Scrape.do is active)
-    if (!USE_SCRAPE_DO_API && normalizedUrl.includes('blackhatworld.com') && normalizedUrl.includes('rss')) {
+    if (!useScrapeDo && normalizedUrl.includes('blackhatworld.com') && normalizedUrl.includes('rss')) {
         console.log('  [BHW-RSS] Enforcing browser fetch (No Scrape.do)...');
         return await fetchXmlViaBrowser(normalizedUrl, context);
     }
@@ -638,14 +662,17 @@ async function fetchXml(url, context) {
 
         let targetUrl = normalizedUrl;
 
-        if (USE_SCRAPE_DO_API && process.env.SCRAPE_DO_TOKEN) {
+        if (useScrapeDo && process.env.SCRAPE_DO_TOKEN) {
             // Use Scrape.do API Gateway
             targetUrl = `http://api.scrape.do?url=${encodeURIComponent(normalizedUrl)}&token=${process.env.SCRAPE_DO_TOKEN}`;
             // Remove proxy config if using Gateway API
             reqConfig.proxy = false;
-        } else {
+        } else if (useScrapeDo) {
             // Use standard proxy if configured
             reqConfig.proxy = AXIOS_PROXY_CONFIG;
+        } else {
+            // Explicitly disable proxy for direct sources
+            reqConfig.proxy = false;
         }
 
         const response = await axios.get(targetUrl, reqConfig);
@@ -755,9 +782,9 @@ function extractSitemapUrls(xmlText) {
     return { type: 'unknown', urls: [] };
 }
 
-async function fetchSitemapUrls(url, maxUrls = 50, depth = 0, context = null) {
+async function fetchSitemapUrls(url, maxUrls = 50, depth = 0, context = null, options = {}) {
     if (depth > 2) return [];
-    const xml = await fetchXml(url, context);
+    const xml = await fetchXml(url, context, options);
     if (!xml) return [];
 
     const parsed = extractSitemapUrls(xml);
@@ -768,7 +795,7 @@ async function fetchSitemapUrls(url, maxUrls = 50, depth = 0, context = null) {
         const pick = sorted.length > 0 ? sorted.slice(0, 3) : [];
         let urls = [];
         for (const sm of pick) {
-            const childUrls = await fetchSitemapUrls(sm.loc, maxUrls - urls.length, depth + 1, context);
+            const childUrls = await fetchSitemapUrls(sm.loc, maxUrls - urls.length, depth + 1, context, options);
             urls = urls.concat(childUrls);
             if (urls.length >= maxUrls) break;
         }
@@ -776,11 +803,12 @@ async function fetchSitemapUrls(url, maxUrls = 50, depth = 0, context = null) {
     }
 
     if (parsed.type === 'urlset') {
-        const sorted = parsed.urls
-            .filter(u => u.loc)
-            .sort((a, b) => new Date(b.lastmod || 0) - new Date(a.lastmod || 0))
-            .map(u => u.loc);
-        return sorted.slice(0, maxUrls);
+        const urls = parsed.urls.filter(u => u.loc);
+        const hasLastmod = urls.some(u => u.lastmod);
+        const ordered = hasLastmod
+            ? urls.sort((a, b) => new Date(b.lastmod || 0) - new Date(a.lastmod || 0))
+            : urls;
+        return ordered.map(u => u.loc).slice(0, maxUrls);
     }
 
     return [];
@@ -890,6 +918,13 @@ function isJobTopic({ title, content, url, prefix, forum }) {
             };
         }
 
+        if (ALLOW_MARKETPLACE && (s.posWeak > 0 || s.urlHit || s.hasCurrency || s.hasContact)) {
+            return {
+                isJob: true,
+                reason: `marketplace:${supplyScore}`
+            };
+        }
+
         return {
             isJob: false,
             reason: `supply:${supplyScore} (demand:${demandScore} insufficient)`
@@ -939,7 +974,7 @@ function shouldPrefilterSkip({ title, url, prefix, forum }) {
     }
 
     if (supplyScore > 0) {
-        return true;
+        return !ALLOW_MARKETPLACE;
     }
 
     if (s.negWeak >= 2 && s.posWeak === 0) {
@@ -1139,11 +1174,12 @@ async function collectLinksFromPage(context, url, options) {
     const prefixSelector = opts.prefixSelector || '';
     const forumSelector = opts.forumSelector || '';
     const r10Fallback = /r10\.net\/search\.php\?do=getnew/i.test(url);
+    const useScrapeDo = opts.useScrapeDo ?? USE_SCRAPE_DO_API;
 
     const page = await context.newPage();
     try {
         let usedContent = false;
-        if (USE_SCRAPE_DO_API) {
+        if (useScrapeDo && USE_SCRAPE_DO_API) {
             const html = await fetchHtmlViaScrapeDo(url);
             if (html && html.length > 1000) {
                 await page.setContent(html, { waitUntil: 'domcontentloaded' });
@@ -1291,7 +1327,10 @@ async function processThreadsForSource(source, threads, context) {
 
         const details = await fetchThreadDetails(context, thread.url, source.contentSelector, source.titleSelector);
         const content = details?.content || '';
-        const finalTitle = (thread.title || '').trim() || (details?.title || '').trim();
+        let finalTitle = (thread.title || '').trim() || (details?.title || '').trim();
+        if (!finalTitle) {
+            finalTitle = deriveTitleFromUrl(thread.url);
+        }
 
         if (!finalTitle) {
             console.log(`  [SKIP:NOTITLE] ${thread.url.substring(0, 60)}...`);
@@ -1334,6 +1373,7 @@ async function processThreadsForSource(source, threads, context) {
 async function processFeedSource(feed, context) {
     console.log(`\n=== ${feed.name.toUpperCase()} ===`);
     let threads = [];
+    const useScrapeDo = feed.useScrapeDo ?? USE_SCRAPE_DO_API;
 
     if (feed.type === 'rss') {
         const feedUrl = sanitizeFeedUrl(
@@ -1341,14 +1381,14 @@ async function processFeedSource(feed, context) {
             feed.allowViewSource
         );
         console.log(`Fetching RSS: ${feedUrl}`);
-        const xml = await fetchXml(feedUrl, context);
+        const xml = await fetchXml(feedUrl, context, { useScrapeDo });
         if (!xml) return;
         threads = extractRssItems(xml, feed.maxItems || 60);
         threads = cleanThreadList(threads, feedUrl);
     } else if (feed.type === 'sitemap') {
         const sitemapUrl = sanitizeFeedUrl(feed.url, feed.allowViewSource);
         console.log(`Fetching Sitemap: ${sitemapUrl}`);
-        const urls = await fetchSitemapUrls(sitemapUrl, feed.maxItems || 60, 0, context);
+        const urls = await fetchSitemapUrls(sitemapUrl, feed.maxItems || 60, 0, context, { useScrapeDo });
         const filtered = feed.urlAllow
             ? urls.filter(u => feed.urlAllow.some(r => r.test(u)))
             : urls;
@@ -1356,7 +1396,7 @@ async function processFeedSource(feed, context) {
     } else if (feed.type === 'html') {
         const feedUrl = sanitizeFeedUrl(feed.url);
         console.log(`Fetching HTML feed: ${feedUrl}`);
-        const rawLinks = await collectLinksFromPage(context, feedUrl, feed);
+        const rawLinks = await collectLinksFromPage(context, feedUrl, { ...feed, useScrapeDo });
         threads = cleanThreadList(rawLinks, feedUrl);
     }
 
@@ -1369,10 +1409,11 @@ async function processFeedSource(feed, context) {
     await processThreadsForSource(feed, threads, context);
 }
 
-async function scrapeFeedSources(context) {
+async function scrapeFeedSources(context, directContext) {
     for (const feed of FEED_SOURCES) {
         try {
-            await processFeedSource(feed, context);
+            const feedContext = feed.useScrapeDo === false ? (directContext || context) : context;
+            await processFeedSource(feed, feedContext);
         } catch (error) {
             console.error(`[${feed.name}] Feed Error:`, error.message.split('\n')[0]);
         }
@@ -1427,10 +1468,13 @@ async function scrape() {
         '--hide-scrollbars'
     ];
 
+    const needsDirectContext = SOURCES.some(s => s.useScrapeDo === false) || FEED_SOURCES.some(f => f.useScrapeDo === false);
+    const hasProxy = Boolean(PLAYWRIGHT_PROXY_CONFIG);
+
     const browser = await chromium.launch({
         headless: true,
         args: browserArgs,
-        proxy: PLAYWRIGHT_PROXY_CONFIG ? PLAYWRIGHT_PROXY_CONFIG : undefined
+        proxy: hasProxy ? PLAYWRIGHT_PROXY_CONFIG : undefined
     });
 
     // Create a fresh context (Stateless for GitHub Actions)
@@ -1442,25 +1486,52 @@ async function scrape() {
             'Accept-Language': 'tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7'
         }
     });
-    await applyCookiesFromEnv(context);
-    context.setDefaultTimeout(60000);
-    context.setDefaultNavigationTimeout(60000);
+    let directBrowser = null;
+    let directContext = context;
 
-    await context.route('**/*', route => {
-        const type = route.request().resourceType();
-        if (['image', 'media', 'font'].includes(type)) {
-            return route.abort();
-        }
-        return route.continue();
-    });
+    if (needsDirectContext && hasProxy) {
+        directBrowser = await chromium.launch({
+            headless: true,
+            args: browserArgs
+        });
+        directContext = await directBrowser.newContext({
+            userAgent: DEFAULT_UA,
+            viewport: { width: 1280, height: 800 },
+            locale: 'tr-TR',
+            extraHTTPHeaders: {
+                'Accept-Language': 'tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7'
+            }
+        });
+    }
+
+    const setupContext = async (ctx) => {
+        await applyCookiesFromEnv(ctx);
+        ctx.setDefaultTimeout(60000);
+        ctx.setDefaultNavigationTimeout(60000);
+
+        await ctx.route('**/*', route => {
+            const type = route.request().resourceType();
+            if (['image', 'media', 'font'].includes(type)) {
+                return route.abort();
+            }
+            return route.continue();
+        });
+    };
+
+    await setupContext(context);
+    if (directContext !== context) {
+        await setupContext(directContext);
+    }
 
     for (const source of SOURCES) {
-        const mainPage = await context.newPage();
+        const activeContext = source.useScrapeDo === false ? (directContext || context) : context;
+        const mainPage = await activeContext.newPage();
         try {
             console.log(`\n=== ${source.name.toUpperCase()} ===`);
             console.log(`Navigating to: ${source.url}`);
 
-            if (USE_SCRAPE_DO_API) {
+            const useScrapeDoApi = USE_SCRAPE_DO_API && source.useScrapeDo !== false && source.useScrapeDoApi !== false;
+            if (useScrapeDoApi) {
                 console.log(`[${source.name}] Fetching page via Scrape.do API...`);
                 // For main pages, we fetch HTML via API then setContent to bypass Cloudflare
                 const html = await fetchHtmlViaScrapeDo(source.url);
@@ -1484,25 +1555,6 @@ async function scrape() {
 
             const safeName = source.name.replace(/[^a-z0-9]/gi, '_').toLowerCase();
             await mainPage.screenshot({ path: `nav_${safeName}.png`, fullPage: false });
-
-            if (source.name === 'r10') {
-                try {
-                    await mainPage.waitForSelector('a[href="#tab-sonAcilan"]', { timeout: 10000 });
-                    await mainPage.evaluate(() => {
-                        const tab = document.querySelector('a[href="#tab-sonAcilan"]');
-                        if (tab) tab.click();
-                    });
-                    // Wait for the AJAX content to load specifically
-                    await mainPage.waitForResponse(response =>
-                        response.url().includes('ajax.php') && response.status() === 200,
-                        { timeout: 10000 }
-                    ).catch(() => { }); // catch timeout if it already loaded
-
-                    await mainPage.waitForTimeout(2000);
-                } catch (e) {
-                    console.warn(`[r10] Tab click non-fatal error: ${e.message}`);
-                }
-            }
 
             // Anti-bot & Challenge check
             await handleAntiBot(mainPage);
@@ -1559,7 +1611,7 @@ async function scrape() {
                         }
                     }
                 });
-                return results.slice(0, 50);
+                return results.slice(0, s.maxThreads || 50);
             }, source);
 
             const threads = cleanThreadList(rawThreads, source.url);
@@ -1569,6 +1621,7 @@ async function scrape() {
 
             const prefilteredThreads = [];
             let skippedCount = 0;
+            const maxThreads = source.maxThreads || MAX_THREADS_PER_SOURCE;
             for (const thread of threads) {
                 // Stop if we have seen 10 consecutive old topics
                 if (skippedCount >= 10) {
@@ -1588,7 +1641,7 @@ async function scrape() {
                 }
                 prefilteredThreads.push(thread);
                 SEEN_URLS.add(thread.url);
-                if (prefilteredThreads.length >= MAX_THREADS_PER_SOURCE) {
+                if (prefilteredThreads.length >= maxThreads) {
                     break;
                 }
             }
@@ -1601,9 +1654,12 @@ async function scrape() {
                 // Add delay between requests
                 await new Promise(resolve => setTimeout(resolve, 600));
 
-                const details = await fetchThreadDetails(context, thread.url, source.contentSelector, source.titleSelector);
+                const details = await fetchThreadDetails(activeContext, thread.url, source.contentSelector, source.titleSelector);
                 const content = details?.content || '';
-                const finalTitle = (thread.title || '').trim() || (details?.title || '').trim();
+                let finalTitle = (thread.title || '').trim() || (details?.title || '').trim();
+                if (!finalTitle) {
+                    finalTitle = deriveTitleFromUrl(thread.url);
+                }
 
                 if (content && content.length >= MIN_CONTENT_LENGTH) {
                     const jobCheck = isJobTopic({ title: finalTitle, content, url: thread.url });
@@ -1642,9 +1698,12 @@ async function scrape() {
         }
     }
 
-    await scrapeFeedSources(context);
+    await scrapeFeedSources(context, directContext);
 
     saveSeenUrls();
+    if (directBrowser) {
+        await directBrowser.close();
+    }
     await browser.close();
     console.log("\n=== Scrape finished ===");
 }
