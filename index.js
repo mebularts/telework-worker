@@ -819,29 +819,60 @@ async function waitForAnySelector(page, selectorList, timeoutMs) {
 async function handleAntiBot(page) {
     try {
         const title = await page.title();
-        if (title.includes('Just a moment') || title.includes('Cloudflare') || title.includes('Access denied')) {
+        if (title.includes('Just a moment') || title.includes('Cloudflare') || title.includes('Access denied') || title.includes('Bir dakika') || title.includes('Security Check')) {
             console.log('  [AntiBot] Challenge page detected: ' + title);
-            await page.waitForTimeout(5000);
+            await page.waitForTimeout(3000);
 
-            // Try specific cloudflare click
-            try {
-                const frame = page.frames().find(f => f.url().includes('cloudflare'));
-                if (frame) {
-                    const checkbox = await frame.$('input[type="checkbox"]');
-                    if (checkbox) {
-                        await checkbox.click();
-                        console.log('  [AntiBot] Clicked Cloudflare checkbox in frame');
-                        await page.waitForTimeout(5000);
+            // Attempt to click Cloudflare checkbox (supports Shadow DOM)
+            const clicked = await page.evaluate(async () => {
+                function clickWidget(root) {
+                    // Check standard inputs
+                    const inputs = root.querySelectorAll('input[type="checkbox"], #challenge-stage iframe, .ctp-checkbox-label, #turnstile-wrapper');
+                    for (const input of inputs) {
+                        // If it's an iframe, we can't easily pierce it from here unless it's same-origin, 
+                        // but usually the click target is a label or div around it.
+                        if (input.offsetParent !== null) { // is visible
+                            input.click();
+                            return true;
+                        }
                     }
-                }
-            } catch { }
 
-            // Basic mouse jiggle
-            await page.mouse.move(100, 100);
-            await page.mouse.move(200, 200);
+                    // Shadow DOM recursion
+                    const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+                    while (walker.nextNode()) {
+                        const node = walker.currentNode;
+                        if (node.shadowRoot) {
+                            if (clickWidget(node.shadowRoot)) return true;
+                        }
+                    }
+                    return false;
+                }
+
+                return clickWidget(document);
+            });
+
+            if (clicked) {
+                console.log('  [AntiBot] Clicked potential Cloudflare widget via DOM.');
+            } else {
+                // Try looking in iframes from the context side
+                const frames = page.frames();
+                for (const frame of frames) {
+                    try {
+                        const btn = await frame.$('input[type="checkbox"], .ctp-checkbox-label');
+                        if (btn) {
+                            await btn.click();
+                            console.log('  [AntiBot] Clicked checkbox in iframe: ' + frame.url());
+                            break;
+                        }
+                    } catch { }
+                }
+            }
+
+            console.log('  [AntiBot] Waiting for challenge to resolve...');
+            await page.waitForTimeout(15000); // Give it time to reload
         }
     } catch (e) {
-        // flutter
+        console.log(`  [AntiBot] Error during handling: ${e.message}`);
     }
 }
 
