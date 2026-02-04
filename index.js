@@ -168,7 +168,7 @@ const SOURCES = [
     {
         name: 'r10',
         url: 'https://www.r10.net/',
-        containerSelector: '#tab-sonAcilan, #tab-sonAcilan .list, #tab-sonAcilan .list ul',
+        containerSelector: '#tab-sonAcilan .list ul li.thread',
         threadSelector: '#tab-sonAcilan .list ul li.thread .title a, #tab-sonAcilan a[id^="thread_title_"], a[id^="thread_title_"]',
         contentSelector: CONTENT_SELECTORS.r10
     },
@@ -182,7 +182,7 @@ const SOURCES = [
     {
         name: 'bhw',
         url: 'https://www.blackhatworld.com/forums/hire-a-freelancer.76/',
-        containerSelector: '.structItemContainer, .p-body',
+        containerSelector: '.structItemContainer .structItem--thread',
         threadSelector: '.structItem-title a, .block-row .contentRow-title a',
         contentSelector: CONTENT_SELECTORS.bhw
     }
@@ -486,8 +486,21 @@ async function fetchXmlViaBrowser(url, context) {
 
     const page = await context.newPage();
     try {
-        await page.goto(isViewSource ? url : actualUrl, { waitUntil: 'networkidle', timeout: 45000 });
-        await page.waitForTimeout(1200);
+        await page.setExtraHTTPHeaders({
+            'Referer': actualUrl
+        });
+        await page.goto(isViewSource ? url : actualUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+
+        // Handle Cloudflare challenge check if present
+        try {
+            const challenge = await page.$('#challenge-running');
+            if (challenge) {
+                await page.waitForTimeout(5000);
+            }
+        } catch { }
+
+        await page.waitForTimeout(2000);
+
         const raw = await page.evaluate(() => {
             const pre = document.querySelector('pre');
             if (pre && pre.innerText) {
@@ -502,7 +515,7 @@ async function fetchXmlViaBrowser(url, context) {
     } catch (e) {
         console.warn(`  [!] Browser XML page fallback failed: ${e.message.split('\n')[0]}`);
     } finally {
-        await page.close().catch(() => {});
+        await page.close().catch(() => { });
     }
     return null;
 }
@@ -674,7 +687,7 @@ async function resolveBhwRssUrl(defaultUrl, context) {
         } catch {
             // ignore, fallback below
         } finally {
-            await page.close().catch(() => {});
+            await page.close().catch(() => { });
         }
     }
 
@@ -922,7 +935,7 @@ async function collectLinksFromPage(context, url, options) {
         const waitTarget = itemSelector || linkSelector || 'a';
         let found = await waitForAnySelector(page, waitTarget, 12000);
         if (!found) {
-            await page.waitForLoadState('networkidle', { timeout: 12000 }).catch(() => {});
+            await page.waitForLoadState('networkidle', { timeout: 12000 }).catch(() => { });
             found = await waitForAnySelector(page, waitTarget, 8000);
         }
 
@@ -1150,8 +1163,8 @@ async function scrape() {
         }
     });
     await applyCookiesFromEnv(context);
-    context.setDefaultTimeout(30000);
-    context.setDefaultNavigationTimeout(45000);
+    context.setDefaultTimeout(60000);
+    context.setDefaultNavigationTimeout(60000);
 
     await context.route('**/*', route => {
         const type = route.request().resourceType();
@@ -1186,7 +1199,7 @@ async function scrape() {
             try {
                 await mainPage.waitForSelector(source.containerSelector, { timeout: 10000 });
             } catch (e) {
-                await mainPage.waitForLoadState('networkidle', { timeout: 12000 }).catch(() => {});
+                await mainPage.waitForLoadState('networkidle', { timeout: 12000 }).catch(() => { });
                 try {
                     await mainPage.waitForSelector(source.containerSelector, { timeout: 8000 });
                 } catch {
