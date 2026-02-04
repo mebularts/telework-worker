@@ -11,7 +11,7 @@ const { XMLParser } = require('fast-xml-parser');
 const WEBHOOK_URL = process.env.WEBHOOK_URL;
 const SCRAPER_TOKEN = process.env.SCRAPER_TOKEN;
 
-const MAX_THREADS_PER_SOURCE = 15;
+const MAX_THREADS_PER_SOURCE = 20;
 const MIN_CONTENT_LENGTH = 80;
 const MAX_CONTENT_LENGTH = 4000;
 
@@ -168,8 +168,8 @@ const SOURCES = [
     {
         name: 'r10',
         url: 'https://www.r10.net/',
-        containerSelector: '#tab-sonAcilan .list ul li.thread',
-        threadSelector: '#tab-sonAcilan .list ul li.thread .title a, #tab-sonAcilan a[id^="thread_title_"], a[id^="thread_title_"]',
+        containerSelector: '.thread, #tab-sonAcilan .list ul li.thread',
+        threadSelector: '.thread .title a, #tab-sonAcilan .list ul li.thread .title a, a[id^="thread_title_"]',
         contentSelector: CONTENT_SELECTORS.r10
     },
     {
@@ -182,7 +182,7 @@ const SOURCES = [
     {
         name: 'bhw',
         url: 'https://www.blackhatworld.com/forums/hire-a-freelancer.76/',
-        containerSelector: '.structItemContainer .structItem--thread',
+        containerSelector: '.structItem--thread, .structItem',
         threadSelector: '.structItem-title a, .block-row .contentRow-title a',
         contentSelector: CONTENT_SELECTORS.bhw
     }
@@ -816,6 +816,35 @@ async function waitForAnySelector(page, selectorList, timeoutMs) {
     return null;
 }
 
+async function handleAntiBot(page) {
+    try {
+        const title = await page.title();
+        if (title.includes('Just a moment') || title.includes('Cloudflare') || title.includes('Access denied')) {
+            console.log('  [AntiBot] Challenge page detected: ' + title);
+            await page.waitForTimeout(5000);
+
+            // Try specific cloudflare click
+            try {
+                const frame = page.frames().find(f => f.url().includes('cloudflare'));
+                if (frame) {
+                    const checkbox = await frame.$('input[type="checkbox"]');
+                    if (checkbox) {
+                        await checkbox.click();
+                        console.log('  [AntiBot] Clicked Cloudflare checkbox in frame');
+                        await page.waitForTimeout(5000);
+                    }
+                }
+            } catch { }
+
+            // Basic mouse jiggle
+            await page.mouse.move(100, 100);
+            await page.mouse.move(200, 200);
+        }
+    } catch (e) {
+        // flutter
+    }
+}
+
 async function fetchThreadDetails(context, url, contentSelector, titleSelector) {
     const page = await context.newPage();
     try {
@@ -1153,7 +1182,21 @@ async function scrape() {
         process.exit(1);
     }
 
-    const browser = await chromium.launch({ headless: true });
+    const browser = await chromium.launch({
+        headless: true,
+        args: [
+            '--disable-blink-features=AutomationControlled',
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-infobars',
+            '--window-position=0,0',
+            '--ignore-certifcate-errors',
+            '--ignore-certifcate-errors-spki-list',
+            '--disable-accelerated-2d-canvas',
+            '--disable-gpu',
+            '--hide-scrollbars'
+        ]
+    });
     const context = await browser.newContext({
         userAgent: DEFAULT_UA,
         viewport: { width: 1920, height: 1080 },
@@ -1187,23 +1230,45 @@ async function scrape() {
             await mainPage.screenshot({ path: `nav_${safeName}.png`, fullPage: false });
 
             if (source.name === 'r10') {
-                await mainPage.evaluate(() => {
-                    const tab = document.querySelector('a[href="#tab-sonAcilan"]');
-                    if (tab) {
-                        tab.click();
-                    }
-                });
-                await mainPage.waitForTimeout(800);
+                try {
+                    await mainPage.waitForSelector('a[href="#tab-sonAcilan"]', { timeout: 10000 });
+                    await mainPage.evaluate(() => {
+                        const tab = document.querySelector('a[href="#tab-sonAcilan"]');
+                        if (tab) tab.click();
+                    });
+                    // Wait for the AJAX content to load specifically
+                    await mainPage.waitForResponse(response =>
+                        response.url().includes('ajax.php') && response.status() === 200,
+                        { timeout: 10000 }
+                    ).catch(() => { }); // catch timeout if it already loaded
+
+                    await mainPage.waitForTimeout(2000);
+                } catch (e) {
+                    console.warn(`[r10] Tab click non-fatal error: ${e.message}`);
+                }
             }
 
+            // Anti-bot & Challenge check
+            await handleAntiBot(mainPage);
+
+            let containerFound = false;
             try {
                 await mainPage.waitForSelector(source.containerSelector, { timeout: 10000 });
+                containerFound = true;
             } catch (e) {
                 await mainPage.waitForLoadState('networkidle', { timeout: 12000 }).catch(() => { });
                 try {
                     await mainPage.waitForSelector(source.containerSelector, { timeout: 8000 });
+                    containerFound = true;
                 } catch {
+                    const title = await mainPage.title();
+                    console.warn(`[${source.name}] Container not found. Page Title: "${title}"`);
+                    if (title.includes('Just a moment') || title.includes('Cloudflare')) {
+                        console.log(`[${source.name}] Challenge detected. Pausing...`);
+                        await mainPage.waitForTimeout(10000);
+                    }
                     console.warn(`[${source.name}] Container not found, trying alternate approach...`);
+
                     // Save debug info
                     const content = await mainPage.content();
                     require('fs').writeFileSync(`debug_${safeName}.html`, content);
