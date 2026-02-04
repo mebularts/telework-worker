@@ -401,13 +401,17 @@ function normalizeCookie(cookie) {
             no_restriction: 'None',
             unrestricted: 'None',
             unspecified: undefined,
-            'no_restriction': 'None'
+            'no_restriction': 'None',
+            '0': 'None',
+            '1': 'Lax',
+            '2': 'Strict',
+            '-1': undefined
         };
         const key = String(c.sameSite).toLowerCase();
         const mapped = map[key];
         if (mapped) {
             c.sameSite = mapped;
-        } else if (mapped === undefined && (key === 'unspecified')) {
+        } else if (mapped === undefined) {
             delete c.sameSite;
         }
     }
@@ -454,7 +458,7 @@ async function applyCookiesFromEnv(context) {
 function sanitizeFeedUrl(url, preserveViewSource = false) {
     if (!url) return '';
     let cleaned = url.trim();
-    if (!preserveViewSource && cleaned.startsWith('view-source:')) {
+    if (!preserveViewSource && cleaned.toLowerCase().startsWith('view-source:')) {
         cleaned = cleaned.replace(/^view-source:/i, '');
     }
     return cleaned;
@@ -536,8 +540,9 @@ function extractXmlPayload(text) {
 
 async function fetchXmlViaBrowser(url, context) {
     if (!context) return null;
-    const isViewSource = url && url.startsWith('view-source:');
-    const actualUrl = isViewSource ? url.replace(/^view-source:/i, '') : url;
+    const normalizedUrl = (url || '').trim();
+    const isViewSource = normalizedUrl.toLowerCase().startsWith('view-source:');
+    const actualUrl = isViewSource ? normalizedUrl.replace(/^view-source:/i, '') : normalizedUrl;
     try {
         if (!isViewSource) {
             const response = await context.request.get(actualUrl, {
@@ -564,7 +569,16 @@ async function fetchXmlViaBrowser(url, context) {
         await page.setExtraHTTPHeaders({
             'Referer': actualUrl
         });
-        await page.goto(isViewSource ? url : actualUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+        try {
+            await page.goto(isViewSource ? normalizedUrl : actualUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+        } catch (e) {
+            if (isViewSource) {
+                console.warn(`  [!] view-source navigation failed, falling back to direct URL`);
+                await page.goto(actualUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+            } else {
+                throw e;
+            }
+        }
 
         // Handle Cloudflare challenge check if present
         try {
@@ -576,17 +590,19 @@ async function fetchXmlViaBrowser(url, context) {
 
         await page.waitForTimeout(2000);
 
-        const raw = await page.evaluate(() => {
+        const rawText = await page.evaluate(() => {
             const pre = document.querySelector('pre');
             if (pre && pre.innerText) {
                 return pre.innerText;
             }
             return document.documentElement.innerText || '';
         });
-        const payload = extractXmlPayload(raw);
+        const payload = extractXmlPayload(rawText);
         if (payload && (payload.includes('<urlset') || payload.includes('<rss') || payload.includes('<sitemapindex') || payload.includes('<feed'))) {
             return payload;
         }
+        const html = await page.content();
+        return html || rawText;
     } catch (e) {
         console.warn(`  [!] Browser XML page fallback failed: ${e.message.split('\n')[0]}`);
     } finally {
@@ -596,14 +612,15 @@ async function fetchXmlViaBrowser(url, context) {
 }
 
 async function fetchXml(url, context) {
-    if (url && url.startsWith('view-source:')) {
-        return await fetchXmlViaBrowser(url, context);
+    const normalizedUrl = (url || '').trim();
+    if (normalizedUrl.toLowerCase().startsWith('view-source:')) {
+        return await fetchXmlViaBrowser(normalizedUrl, context);
     }
 
     // Force browser for BHW RSS which consistently blocks axios (UNLESS Scrape.do is active)
-    if (!USE_SCRAPE_DO_API && url.includes('blackhatworld.com') && url.includes('rss')) {
+    if (!USE_SCRAPE_DO_API && normalizedUrl.includes('blackhatworld.com') && normalizedUrl.includes('rss')) {
         console.log('  [BHW-RSS] Enforcing browser fetch (No Scrape.do)...');
-        return await fetchXmlViaBrowser(url, context);
+        return await fetchXmlViaBrowser(normalizedUrl, context);
     }
 
     try {
@@ -613,17 +630,17 @@ async function fetchXml(url, context) {
                 'User-Agent': DEFAULT_UA,
                 'Accept': 'application/xml,text/xml,application/rss+xml,application/atom+xml',
                 'Accept-Language': 'tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7',
-                'Referer': new URL(url).origin + '/',
+                'Referer': new URL(normalizedUrl).origin + '/',
                 'Cache-Control': 'no-cache',
                 'Pragma': 'no-cache'
             }
         };
 
-        let targetUrl = url;
+        let targetUrl = normalizedUrl;
 
         if (USE_SCRAPE_DO_API && process.env.SCRAPE_DO_TOKEN) {
             // Use Scrape.do API Gateway
-            targetUrl = `http://api.scrape.do?url=${encodeURIComponent(url)}&token=${process.env.SCRAPE_DO_TOKEN}`;
+            targetUrl = `http://api.scrape.do?url=${encodeURIComponent(normalizedUrl)}&token=${process.env.SCRAPE_DO_TOKEN}`;
             // Remove proxy config if using Gateway API
             reqConfig.proxy = false;
         } else {
@@ -635,8 +652,8 @@ async function fetchXml(url, context) {
         const text = typeof response.data === 'string' ? response.data : String(response.data);
         return extractXmlPayload(text);
     } catch (e) {
-        console.warn(`  [!] XML fetch failed: ${url} -> ${e.message.split('\n')[0]}`);
-        return await fetchXmlViaBrowser(url, context);
+        console.warn(`  [!] XML fetch failed: ${normalizedUrl} -> ${e.message.split('\n')[0]}`);
+        return await fetchXmlViaBrowser(normalizedUrl, context);
     }
 }
 
@@ -698,6 +715,15 @@ function extractRssItems(xmlText, maxItems = 50) {
     }
 }
 
+function extractUrlsFromHtmlSitemap(text) {
+    if (!text) return [];
+    const matches = text.match(/https?:\/\/[^\s"'<>]+/gi) || [];
+    const cleaned = matches
+        .map(u => u.replace(/&amp;/g, '&'))
+        .filter(u => !u.toLowerCase().includes('sitemap') && !u.toLowerCase().endsWith('.xml'));
+    return Array.from(new Set(cleaned));
+}
+
 function extractSitemapUrls(xmlText) {
     try {
         const parsed = XML_PARSER.parse(xmlText);
@@ -719,6 +745,11 @@ function extractSitemapUrls(xmlText) {
         }
     } catch (e) {
         console.warn(`  [!] Sitemap parse failed: ${e.message.split('\n')[0]}`);
+    }
+
+    const htmlUrls = extractUrlsFromHtmlSitemap(xmlText);
+    if (htmlUrls.length > 0) {
+        return { type: 'urlset', urls: htmlUrls.map(loc => ({ loc, lastmod: '' })) };
     }
 
     return { type: 'unknown', urls: [] };
@@ -1111,7 +1142,22 @@ async function collectLinksFromPage(context, url, options) {
 
     const page = await context.newPage();
     try {
-        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
+        let usedContent = false;
+        if (USE_SCRAPE_DO_API) {
+            const html = await fetchHtmlViaScrapeDo(url);
+            if (html && html.length > 1000) {
+                await page.setContent(html, { waitUntil: 'domcontentloaded' });
+                await page.evaluate((baseUrl) => {
+                    const base = document.createElement('base');
+                    base.href = baseUrl;
+                    document.head.prepend(base);
+                }, url);
+                usedContent = true;
+            }
+        }
+        if (!usedContent) {
+            await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
+        }
         await page.waitForTimeout(1200);
 
         const waitTarget = itemSelector || linkSelector || 'a';
