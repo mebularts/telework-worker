@@ -24,7 +24,17 @@ const XML_PARSER = new XMLParser({
     trimValues: true
 });
 
-const SEEN_URLS = new Set();
+const SEEN_URLS_FILE = path.join(__dirname, 'seen_urls.json');
+let SEEN_URLS = new Set();
+try {
+    if (fs.existsSync(SEEN_URLS_FILE)) {
+        const data = JSON.parse(fs.readFileSync(SEEN_URLS_FILE, 'utf8'));
+        SEEN_URLS = new Set(data);
+        console.log(`[Persistence] Loaded ${SEEN_URLS.size} seen URLs.`);
+    }
+} catch (e) {
+    console.warn(`[Persistence] Failed to load seen_urls.json: ${e.message}`);
+}
 
 const COOKIE_ENV_KEY = 'SCRAPER_COOKIES_JSON';
 const COOKIE_ENV_KEY_ALT = 'SCRAPER_COOKIES';
@@ -1147,7 +1157,20 @@ async function processThreadsForSource(source, threads, context) {
             break;
         }
     }
+    process.on('SIGINT', () => {
+        console.log('\nGracefully shutting down...');
+        saveSeenUrls();
+        process.exit();
+    });
 
+    function saveSeenUrls() {
+        try {
+            fs.writeFileSync(SEEN_URLS_FILE, JSON.stringify([...SEEN_URLS], null, 2));
+            console.log(`[Persistence] Saved ${SEEN_URLS.size} seen URLs.`);
+        } catch (e) {
+            console.warn(`[Persistence] Failed to save seen_urls.json: ${e.message}`);
+        }
+    }
     console.log(`Fetching content for ${prefiltered.length} topics...`);
 
     const enrichedThreads = [];
@@ -1280,19 +1303,25 @@ async function scrape() {
         }
     }
 
-    const browser = await chromium.launch({
-        headless: true,
+    const isHeadless = process.env.HEADLESS !== 'false'; // default true
+    const userDataDir = path.join(__dirname, 'browser_data');
+
+    console.log(`[Browser] Launching (Headless: ${isHeadless}). Profile: ${userDataDir}`);
+
+    const context = await chromium.launchPersistentContext(userDataDir, {
+        headless: isHeadless,
         args: browserArgs,
-        proxy: proxyConfig.server ? proxyConfig : undefined
-    });
-    const context = await browser.newContext({
+        proxy: proxyConfig.server ? proxyConfig : undefined,
         userAgent: DEFAULT_UA,
-        viewport: { width: 1920, height: 1080 },
+        viewport: { width: 1280, height: 800 },
         locale: 'tr-TR',
         extraHTTPHeaders: {
             'Accept-Language': 'tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7'
         }
     });
+
+    const browser = context; // persistent context acts as browser + context
+    // No need for browser.newContext() with launchPersistentContext
     await applyCookiesFromEnv(context);
     context.setDefaultTimeout(60000);
     context.setDefaultNavigationTimeout(60000);
@@ -1469,13 +1498,15 @@ async function scrape() {
             console.error(`[${source.name}] Critical Error:`, error.message.split('\n')[0]);
             const safeName = source.name.replace(/[^a-z0-9]/gi, '_').toLowerCase();
             await mainPage.screenshot({ path: `critical_${safeName}.png` }).catch(() => { });
+            // Don't close mainPage here if persistent? actually we should.
             await mainPage.close().catch(() => { });
         }
     }
 
     await scrapeFeedSources(context);
 
-    await browser.close();
+    saveSeenUrls();
+    await context.close();
     console.log("\n=== Scrape finished ===");
 }
 
