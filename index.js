@@ -1,5 +1,6 @@
 const { chromium } = require('playwright-extra');
 const stealth = require('puppeteer-extra-plugin-stealth')();
+const RecaptchaPlugin = require('puppeteer-extra-plugin-recaptcha');
 
 const fs = require('fs');
 const path = require('path');
@@ -41,6 +42,39 @@ const COOKIE_ENV_KEY_ALT = 'SCRAPER_COOKIES';
 const COOKIE_FILES_ENV = 'SCRAPER_COOKIES_FILES';
 const COOKIE_FILES_ENV_ALT = 'SCRAPER_COOKIES_FILE';
 let HAS_COOKIES = false;
+
+// Proxy Configuration
+let AXIOS_PROXY_CONFIG = null;
+let PLAYWRIGHT_PROXY_CONFIG = null;
+
+if (process.env.SCRAPER_PROXY) {
+    try {
+        const proxyUrl = new URL(process.env.SCRAPER_PROXY);
+
+        // For Playwright
+        PLAYWRIGHT_PROXY_CONFIG = {
+            server: `${proxyUrl.protocol}//${proxyUrl.host}`
+        };
+        if (proxyUrl.username) PLAYWRIGHT_PROXY_CONFIG.username = proxyUrl.username;
+        if (proxyUrl.password) PLAYWRIGHT_PROXY_CONFIG.password = proxyUrl.password;
+
+        // For Axios
+        AXIOS_PROXY_CONFIG = {
+            protocol: proxyUrl.protocol,
+            host: proxyUrl.hostname,
+            port: Number(proxyUrl.port) || (proxyUrl.protocol === 'https:' ? 443 : 80)
+        };
+        if (proxyUrl.username) {
+            AXIOS_PROXY_CONFIG.auth = {
+                username: proxyUrl.username,
+                password: proxyUrl.password || ''
+            };
+        }
+        console.log(`[Proxy] Configuration loaded for ${proxyUrl.hostname}`);
+    } catch (e) {
+        console.warn(`[Proxy] Invalid URL: ${e.message}`);
+    }
+}
 
 const JOB_URL_HINTS = [
     '/is-ilan', '/is-ilani', '/is-ilanlari',
@@ -559,16 +593,23 @@ async function fetchXml(url, context) {
     if (url && url.startsWith('view-source:')) {
         return await fetchXmlViaBrowser(url, context);
     }
-    if (HAS_COOKIES && context) {
-        const viaBrowser = await fetchXmlViaBrowser(url, context);
-        if (viaBrowser) return viaBrowser;
-    }
+    // For BHW, prefer browser if cookies are present, OR if we have a proxy and Axios fails.
+    // actually, let's try Axios with Proxy first.
+
     try {
         const response = await axios.get(url, {
             timeout: 30000,
+            proxy: AXIOS_PROXY_CONFIG, // Use the parsed proxy config
             headers: {
                 'User-Agent': DEFAULT_UA,
-                'Accept': 'application/xml,text/xml,application/rss+xml'
+                'Accept': 'application/xml,text/xml,application/rss+xml,application/atom+xml',
+                'Accept-Language': 'tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7',
+                'Referer': new URL(url).origin + '/',
+                'Cache-Control': 'no-cache',
+                'Pragma': 'no-cache',
+                'Sec-Ch-Ua': '"Not A(Brand";v="99", "Google Chrome";v="121", "Chromium";v="121"',
+                'Sec-Ch-Ua-Mobile': '?0',
+                'Sec-Ch-Ua-Platform': '"Windows"'
             }
         });
         const text = typeof response.data === 'string' ? response.data : String(response.data);
@@ -1275,6 +1316,33 @@ async function scrape() {
         process.exit(1);
     }
 
+    // Proxy config logic moved to top of file
+    let PLAYWRIGHT_PROXY_CONFIG = undefined;
+    let AXIOS_PROXY_CONFIG = undefined;
+
+    if (process.env.SCRAPER_PROXY) {
+        try {
+            const proxyUrl = new URL(process.env.SCRAPER_PROXY);
+            PLAYWRIGHT_PROXY_CONFIG = {
+                server: `${proxyUrl.protocol}//${proxyUrl.host}`,
+                username: proxyUrl.username,
+                password: proxyUrl.password
+            };
+            AXIOS_PROXY_CONFIG = {
+                host: proxyUrl.hostname,
+                port: proxyUrl.port,
+                protocol: proxyUrl.protocol.replace(':', ''),
+                auth: proxyUrl.username && proxyUrl.password ? {
+                    username: proxyUrl.username,
+                    password: proxyUrl.password
+                } : undefined
+            };
+            console.log(`[proxy] Using proxy: ${PLAYWRIGHT_PROXY_CONFIG.server}`);
+        } catch (e) {
+            console.warn(`[proxy] Invalid proxy URL: ${e.message}`);
+        }
+    }
+
     const browserArgs = [
         '--disable-blink-features=AutomationControlled',
         '--no-sandbox',
@@ -1288,30 +1356,14 @@ async function scrape() {
         '--hide-scrollbars'
     ];
 
-    const proxyConfig = {};
-    if (process.env.SCRAPER_PROXY) {
-        // Format: http://user:pass@ip:port or http://ip:port
-        // Playwright expects: { server: 'http://ip:port', username: 'user', password: 'pass' }
-        try {
-            const proxyUrl = new URL(process.env.SCRAPER_PROXY);
-            proxyConfig.server = `${proxyUrl.protocol}//${proxyUrl.host}`;
-            if (proxyUrl.username) proxyConfig.username = proxyUrl.username;
-            if (proxyUrl.password) proxyConfig.password = proxyUrl.password;
-            console.log(`[proxy] Using proxy: ${proxyConfig.server}`);
-        } catch (e) {
-            console.warn(`[proxy] Invalid proxy URL: ${e.message}`);
-        }
-    }
-
-    const isHeadless = process.env.HEADLESS !== 'false'; // default true
-    const userDataDir = path.join(__dirname, 'browser_data');
-
-    console.log(`[Browser] Launching (Headless: ${isHeadless}). Profile: ${userDataDir}`);
-
-    const context = await chromium.launchPersistentContext(userDataDir, {
-        headless: isHeadless,
+    const browser = await chromium.launch({
+        headless: true,
         args: browserArgs,
-        proxy: proxyConfig.server ? proxyConfig : undefined,
+        proxy: PLAYWRIGHT_PROXY_CONFIG ? PLAYWRIGHT_PROXY_CONFIG : undefined
+    });
+
+    // Create a fresh context (Stateless for GitHub Actions)
+    const context = await browser.newContext({
         userAgent: DEFAULT_UA,
         viewport: { width: 1280, height: 800 },
         locale: 'tr-TR',
@@ -1319,9 +1371,6 @@ async function scrape() {
             'Accept-Language': 'tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7'
         }
     });
-
-    const browser = context; // persistent context acts as browser + context
-    // No need for browser.newContext() with launchPersistentContext
     await applyCookiesFromEnv(context);
     context.setDefaultTimeout(60000);
     context.setDefaultNavigationTimeout(60000);
@@ -1506,7 +1555,7 @@ async function scrape() {
     await scrapeFeedSources(context);
 
     saveSeenUrls();
-    await context.close();
+    await browser.close();
     console.log("\n=== Scrape finished ===");
 }
 
