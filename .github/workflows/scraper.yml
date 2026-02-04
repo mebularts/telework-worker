@@ -15,6 +15,15 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
+
+      # CACHE ADIMI: seen_urls.json dosyasını saklamak için
+      - name: Cache Seen URLs
+        uses: actions/cache@v3
+        with:
+          path: seen_urls.json
+          key: seen-urls-${{ github.run_id }}
+          restore-keys: |
+            seen-urls-
           
       - name: Install dependencies
         run: |
@@ -28,6 +37,9 @@ jobs:
           WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
           SCRAPER_TOKEN: ${{ secrets.SCRAPER_TOKEN }}
           SCRAPER_COOKIES_JSON: ${{ secrets.SCRAPER_COOKIES_JSON }}
+          SCRAPE_DO_TOKEN: ${{ secrets.SCRAPE_DO_TOKEN }}
+          CAPTCHA_TOKEN: ${{ secrets.CAPTCHA_TOKEN }}
+          SCRAPER_PROXY: ${{ secrets.SCRAPER_PROXY }}
 
       - name: Upload Debug Artifacts
         if: always()
@@ -37,4 +49,5 @@ jobs:
           path: |
             *.png
             *.html
+            seen_urls.json
           retention-days: 1
