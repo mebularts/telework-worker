@@ -129,45 +129,7 @@ const JOB_POSITIVE_STRONG_PATTERNS = [
     /\balinacak\b/i,
     /\balinacaktir\b/i,
     /\balinir\b/i,
-    /\bsatin alinacak\b/i,
-    /\bsatin alinacaktir\b/i,
-    /\bsatin alinir\b/i,
-    /\bsatin almak istiyorum\b/i,
-    /\bsatin almak istiyoruz\b/i,
-    /\balim yapilacak\b/i,
-    /\balim yapilacaktir\b/i,
-    /\balim istiyorum\b/i,
-    /\barayis\b/i,
-    /\bteklif bekliyorum\b/i,
-    /\bteklif bekliyoruz\b/i,
-    /\balici\b/i,
-    /\balim\b/i,
-    /\bihtiyac\b/i,
-    /\bgerekli\b/i,
-    /\blazim\b/i,
-    /\btalep\b/i,
-    /\bteklif\b/i,
-    /\bfiyat teklifi\b/i,
-    /\bbutce\b/i,
-    /\bbutcem\b/i,
-    /\byaptirilacak\b/i,
-    /\byaptirilacaktir\b/i,
-    /\byaptirmak istiyorum\b/i,
-    /\byapilacak\b/i,
-    /\byapilacaktir\b/i,
-    /\bkurulacak\b/i,
-    /\bkurulacaktir\b/i,
-    /\bhazirlanacak\b/i,
-    /\bgelistirilecek\b/i,
-    /\bgelistirme\b/i,
-    /\bfreelance\b/i,
-    /\bfreelancer\b/i,
-    /\bhiring\b/i,
-    /\bis ilani\b/i,
-    /\bis ilanlari\b/i,
-    /\bis ariyorum\b/i,
-    /\bis ariyoruz\b/i,
-    /\bis araniyor\b/i
+    /\byaptirilacak\b/i
 ];
 
 const JOB_POSITIVE_WEAK_PATTERNS = [
@@ -198,12 +160,12 @@ const JOB_NEGATIVE_STRONG_PATTERNS = [
     /\bbozum\b/i,
     /\bbozdur\b/i,
     /\bbozdurma\b/i,
-    /\breklam\b/i,
-    /\btanitim\b/i,
+    //    /\breklam\b/i, // Moved to weak
+    //    /\btanitim\b/i, // Moved to weak
     /\bkampanya\b/i,
     /\bindirim\b/i,
     /\bfirsat\b/i,
-    /\bpaket\b/i,
+    //    /\bpaket\b/i, // Too aggressive
     /\bbayilik\b/i,
     /\bkupon\b/i,
     /\bpromosyon\b/i,
@@ -213,10 +175,10 @@ const JOB_NEGATIVE_STRONG_PATTERNS = [
     /\bstok\b/i,
     /\btoplu\b/i,
     /\bsponsor\b/i,
-    /\bhizmetleri\b/i,
-    /\bcozumleri\b/i,
-    /\bpaketleri\b/i,
-    /\bsatisi\b/i,
+    //    /\bhizmetleri\b/i, // Too aggressive
+    //    /\bcozumleri\b/i, // Too aggressive
+    //    /\bpaketleri\b/i, // Too aggressive
+    //    /\bsatisi\b/i, // Too aggressive
     /\bscripti\b/i,
     /\byazilimi\b/i,
     /\btemasi\b/i,
