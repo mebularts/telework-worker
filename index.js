@@ -126,10 +126,18 @@ const JOB_POSITIVE_STRONG_PATTERNS = [
     /\baramakta\b/i,
     /\bariyorum\b/i,
     /\bariyoruz\b/i,
+    /\arayisim\b/i,
+    /\arayis\b/i,
     /\balinacak\b/i,
     /\balinacaktir\b/i,
     /\balinir\b/i,
-    /\byaptirilacak\b/i
+    /\balisi\b/i,
+    /\balimi\b/i,
+    /\baliyorum\b/i,
+    /\bihtiyac\b/i,
+    /\bihtiyacim\b/i,
+    /\byaptirilacak\b/i,
+    /\byaptirilir\b/i
 ];
 
 const JOB_POSITIVE_WEAK_PATTERNS = [
@@ -145,7 +153,10 @@ const JOB_POSITIVE_WEAK_PATTERNS = [
     /\bentegrasyon\b/i,
     /\botomasyon\b/i,
     /\bbot\b/i,
-    /\bscraper\b/i
+    /\bscraper\b/i,
+    /\bhizmet\b/i,
+    /\baccount\b/i,
+    /\bhesap\b/i
 ];
 
 const JOB_NEGATIVE_STRONG_PATTERNS = [
@@ -186,8 +197,11 @@ const JOB_NEGATIVE_STRONG_PATTERNS = [
     /\bsunucu\b/i,
     /\bdomain\b/i,
     /\blisans\b/i,
-    /\bhesap\b/i,
-    /\baccount\b/i,
+    // /\bhesap\b/i, // Too aggressive (blocks 'hesap alinacak')
+    // /\baccount\b/i, // Too aggressive
+    /\bsatilik hesap\b/i,
+    /\bhesap satisi\b/i,
+    /\bhesap satilik\b/i,
     /\bmağaza\b/i,
     /\bstore\b/i,
     /\bmarket\b/i,
