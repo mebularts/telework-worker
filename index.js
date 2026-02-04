@@ -664,6 +664,18 @@ async function fetchXml(url, context) {
     }
 }
 
+async function fetchHtmlViaScrapeDo(url) {
+    if (!process.env.SCRAPE_DO_TOKEN) return null;
+    try {
+        const targetUrl = `http://api.scrape.do?url=${encodeURIComponent(url)}&token=${process.env.SCRAPE_DO_TOKEN}`;
+        const response = await axios.get(targetUrl, { timeout: 60000 });
+        return typeof response.data === 'string' ? response.data : String(response.data);
+    } catch (e) {
+        console.warn(`  [!] Scrape.do HTML fetch failed: ${url} -> ${e.message}`);
+        return null;
+    }
+}
+
 function extractRssItems(xmlText, maxItems = 50) {
     try {
         const parsed = XML_PARSER.parse(xmlText);
