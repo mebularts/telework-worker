@@ -4,7 +4,18 @@ const RecaptchaPlugin = require('puppeteer-extra-plugin-recaptcha');
 
 const fs = require('fs');
 const path = require('path');
+const RecaptchaPlugin = require('puppeteer-extra-plugin-recaptcha');
 chromium.use(stealth);
+
+if (process.env.CAPTCHA_TOKEN) {
+    chromium.use(RecaptchaPlugin({
+        provider: { id: '2captcha', token: process.env.CAPTCHA_TOKEN },
+        visualFeedback: true // colorize reCAPTCHAs (violet = detected, green = solved)
+    }));
+    console.log('[Captcha] 2Captcha plugin enabled.');
+} else {
+    console.warn('[Captcha] CAPTCHA_TOKEN not found. Captcha solving disabled.');
+}
 
 const axios = require('axios');
 const { XMLParser } = require('fast-xml-parser');
@@ -35,6 +46,14 @@ try {
     }
 } catch (e) {
     console.warn(`[Persistence] Failed to load seen_urls.json: ${e.message}`);
+}
+function saveSeenUrls() {
+    try {
+        fs.writeFileSync(SEEN_URLS_FILE, JSON.stringify([...SEEN_URLS], null, 2));
+        console.log(`[Persistence] Saved ${SEEN_URLS.size} seen URLs.`);
+    } catch (e) {
+        console.warn(`[Persistence] Failed to save seen_urls.json: ${e.message}`);
+    }
 }
 
 const COOKIE_ENV_KEY = 'SCRAPER_COOKIES_JSON';
@@ -591,6 +610,12 @@ async function fetchXmlViaBrowser(url, context) {
 
 async function fetchXml(url, context) {
     if (url && url.startsWith('view-source:')) {
+        return await fetchXmlViaBrowser(url, context);
+    }
+
+    // Force browser for BHW RSS which consistently blocks axios
+    if (url.includes('blackhatworld.com') && url.includes('rss')) {
+        console.log('  [BHW-RSS] Enforcing browser fetch for better success rate...');
         return await fetchXmlViaBrowser(url, context);
     }
     // For BHW, prefer browser if cookies are present, OR if we have a proxy and Axios fails.
@@ -1204,14 +1229,7 @@ async function processThreadsForSource(source, threads, context) {
         process.exit();
     });
 
-    function saveSeenUrls() {
-        try {
-            fs.writeFileSync(SEEN_URLS_FILE, JSON.stringify([...SEEN_URLS], null, 2));
-            console.log(`[Persistence] Saved ${SEEN_URLS.size} seen URLs.`);
-        } catch (e) {
-            console.warn(`[Persistence] Failed to save seen_urls.json: ${e.message}`);
-        }
-    }
+    // saveSeenUrls moved to global scope
     console.log(`Fetching content for ${prefiltered.length} topics...`);
 
     const enrichedThreads = [];
