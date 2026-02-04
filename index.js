@@ -4,7 +4,7 @@ const RecaptchaPlugin = require('puppeteer-extra-plugin-recaptcha');
 
 const fs = require('fs');
 const path = require('path');
-const RecaptchaPlugin = require('puppeteer-extra-plugin-recaptcha');
+
 chromium.use(stealth);
 
 if (process.env.CAPTCHA_TOKEN) {
