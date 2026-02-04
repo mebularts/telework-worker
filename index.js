@@ -1438,7 +1438,26 @@ async function scrape() {
             console.log(`\n=== ${source.name.toUpperCase()} ===`);
             console.log(`Navigating to: ${source.url}`);
 
-            await mainPage.goto(source.url, { waitUntil: 'domcontentloaded', timeout: 45000 });
+            if (USE_SCRAPE_DO_API) {
+                console.log(`[${source.name}] Fetching page via Scrape.do API...`);
+                // For main pages, we fetch HTML via API then setContent to bypass Cloudflare
+                const html = await fetchHtmlViaScrapeDo(source.url);
+                if (html && html.length > 1000) {
+                    await mainPage.setContent(html, { waitUntil: 'domcontentloaded' });
+                    // Inject a base tag to handle relative links if needed
+                    await mainPage.evaluate((baseUrl) => {
+                        const base = document.createElement('base');
+                        base.href = baseUrl;
+                        document.head.prepend(base);
+                    }, source.url);
+                } else {
+                    console.warn(`[${source.name}] Scrape.do returned empty/invalid HTML. Fallback to direct navigation.`);
+                    await mainPage.goto(source.url, { waitUntil: 'domcontentloaded', timeout: 45000 });
+                }
+            } else {
+                await mainPage.goto(source.url, { waitUntil: 'domcontentloaded', timeout: 45000 });
+            }
+
             await mainPage.waitForTimeout(1500);
 
             const safeName = source.name.replace(/[^a-z0-9]/gi, '_').toLowerCase();
