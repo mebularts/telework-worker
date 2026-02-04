@@ -138,7 +138,24 @@ const JOB_NEGATIVE_STRONG_PATTERNS = [
     /\bgarantili\b/i,
     /\bstok\b/i,
     /\btoplu\b/i,
-    /\bsponsor\b/i
+    /\bsponsor\b/i,
+    /\bhizmetleri\b/i,
+    /\bcozumleri\b/i,
+    /\bpaketleri\b/i,
+    /\bsatisi\b/i,
+    /\bscripti\b/i,
+    /\byazilimi\b/i,
+    /\btemasi\b/i,
+    /\bhosting\b/i,
+    /\bsunucu\b/i,
+    /\bdomain\b/i,
+    /\blisans\b/i,
+    /\bhesap\b/i,
+    /\baccount\b/i,
+    /\bmağaza\b/i,
+    /\bstore\b/i,
+    /\bmarket\b/i,
+    /\bshop\b/i
 ];
 
 const JOB_NEGATIVE_WEAK_PATTERNS = [
@@ -352,6 +369,14 @@ async function applyCookiesFromEnv(context) {
     const cookies = parseCookieEnv(raw).map(normalizeCookie);
 
     const fileList = parseCookieFilesEnv(process.env[COOKIE_FILES_ENV] || process.env[COOKIE_FILES_ENV_ALT]);
+    // Auto-detect local cookie files
+    const localFiles = ['r10-cookies.json', 'bhw-cookies.json', 'cookies.json'];
+    for (const f of localFiles) {
+        if (require('fs').existsSync(f)) {
+            fileList.push(f);
+        }
+    }
+
     for (const filePath of fileList) {
         cookies.push(...readCookiesFromFile(filePath).map(normalizeCookie));
     }
