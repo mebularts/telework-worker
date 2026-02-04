@@ -765,14 +765,24 @@ function isJobTopic({ title, content, url, prefix, forum }) {
     const demandScore = s.posStrong + (s.prefixDemand ? 1 : 0);
     const supplyScore = s.negStrong + (s.prefixSupply ? 1 : 0);
 
-    if (supplyScore > 0 && demandScore === 0) {
+    if (supplyScore > 0) {
+        // If it has "Service/Sale" keywords, be very strict.
+        // Must have very strong demand signals (e.g. "Hizmet Alinacak", "Script Alinacak")
+        // demandScore must be significantly higher than supplyScore + 1 to override a negative signal.
+        if (demandScore > supplyScore + 1 && s.posStrong >= 2) {
+            return {
+                isJob: true,
+                reason: `OVERRIDE: demand:${demandScore} > supply:${supplyScore}`
+            };
+        }
+
         return {
             isJob: false,
-            reason: `supply:${supplyScore},demand:${demandScore}`
+            reason: `supply:${supplyScore} (demand:${demandScore} insufficient)`
         };
     }
 
-    if (demandScore > 0 && supplyScore === 0) {
+    if (demandScore > 0) {
         return {
             isJob: true,
             reason: `demand:${demandScore}`
@@ -806,8 +816,12 @@ function shouldPrefilterSkip({ title, url, prefix, forum }) {
     const demandScore = s.posStrong + (s.prefixDemand ? 1 : 0);
     const supplyScore = s.negStrong + (s.prefixSupply ? 1 : 0);
 
-    if (demandScore > 0) {
-        return false;
+    if (demandScore > 0 && supplyScore > 0) {
+        // This block usually not reached due to above logic, but for safety:
+        return {
+            isJob: false,
+            reason: `mixed-strict: demand:${demandScore},supply:${supplyScore}`
+        };
     }
 
     if (supplyScore > 0) {
@@ -1238,20 +1252,38 @@ async function scrape() {
         process.exit(1);
     }
 
+    const browserArgs = [
+        '--disable-blink-features=AutomationControlled',
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-infobars',
+        '--window-position=0,0',
+        '--ignore-certifcate-errors',
+        '--ignore-certifcate-errors-spki-list',
+        '--disable-accelerated-2d-canvas',
+        '--disable-gpu',
+        '--hide-scrollbars'
+    ];
+
+    const proxyConfig = {};
+    if (process.env.SCRAPER_PROXY) {
+        // Format: http://user:pass@ip:port or http://ip:port
+        // Playwright expects: { server: 'http://ip:port', username: 'user', password: 'pass' }
+        try {
+            const proxyUrl = new URL(process.env.SCRAPER_PROXY);
+            proxyConfig.server = `${proxyUrl.protocol}//${proxyUrl.host}`;
+            if (proxyUrl.username) proxyConfig.username = proxyUrl.username;
+            if (proxyUrl.password) proxyConfig.password = proxyUrl.password;
+            console.log(`[proxy] Using proxy: ${proxyConfig.server}`);
+        } catch (e) {
+            console.warn(`[proxy] Invalid proxy URL: ${e.message}`);
+        }
+    }
+
     const browser = await chromium.launch({
         headless: true,
-        args: [
-            '--disable-blink-features=AutomationControlled',
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-infobars',
-            '--window-position=0,0',
-            '--ignore-certifcate-errors',
-            '--ignore-certifcate-errors-spki-list',
-            '--disable-accelerated-2d-canvas',
-            '--disable-gpu',
-            '--hide-scrollbars'
-        ]
+        args: browserArgs,
+        proxy: proxyConfig.server ? proxyConfig : undefined
     });
     const context = await browser.newContext({
         userAgent: DEFAULT_UA,
@@ -1368,12 +1400,22 @@ async function scrape() {
             await mainPage.close();
 
             const prefilteredThreads = [];
+            let skippedCount = 0;
             for (const thread of threads) {
+                // Stop if we have seen 10 consecutive old topics
+                if (skippedCount >= 10) {
+                    console.log(`[${source.name}] Stopped early: 10 consecutive old topics found.`);
+                    break;
+                }
+
                 if (SEEN_URLS.has(thread.url)) {
+                    skippedCount++;
                     continue;
                 }
+                skippedCount = 0; // reset if we find a new one
+
                 if (shouldPrefilterSkip({ title: thread.title, url: thread.url })) {
-                    console.log(`  [SKIP:NOTJOB] ${thread.title.substring(0, 60)}...`);
+                    console.log(`  [SKIP:PREFILTER] ${thread.title}`);
                     continue;
                 }
                 prefilteredThreads.push(thread);
