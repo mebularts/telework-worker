@@ -66,7 +66,18 @@ let HAS_COOKIES = false;
 let AXIOS_PROXY_CONFIG = null;
 let PLAYWRIGHT_PROXY_CONFIG = null;
 
-if (process.env.SCRAPER_PROXY) {
+let USE_SCRAPE_DO_API = false;
+
+if (process.env.SCRAPE_DO_TOKEN) {
+    console.log('[Proxy] Using Scrape.do API Gateway mode.');
+    USE_SCRAPE_DO_API = true;
+    // For Playwright, we can use their proxy server standard
+    PLAYWRIGHT_PROXY_CONFIG = {
+        server: 'http://proxy-server.scrape.do:8080',
+        username: 'scraperapi',
+        password: process.env.SCRAPE_DO_TOKEN
+    };
+} else if (process.env.SCRAPER_PROXY) {
     try {
         const proxyUrl = new URL(process.env.SCRAPER_PROXY);
 
@@ -79,7 +90,7 @@ if (process.env.SCRAPER_PROXY) {
 
         // For Axios
         AXIOS_PROXY_CONFIG = {
-            protocol: proxyUrl.protocol,
+            protocol: proxyUrl.protocol.replace(':', ''),
             host: proxyUrl.hostname,
             port: Number(proxyUrl.port) || (proxyUrl.protocol === 'https:' ? 443 : 80)
         };
@@ -613,30 +624,38 @@ async function fetchXml(url, context) {
         return await fetchXmlViaBrowser(url, context);
     }
 
-    // Force browser for BHW RSS which consistently blocks axios
-    if (url.includes('blackhatworld.com') && url.includes('rss')) {
-        console.log('  [BHW-RSS] Enforcing browser fetch for better success rate...');
+    // Force browser for BHW RSS which consistently blocks axios (UNLESS Scrape.do is active)
+    if (!USE_SCRAPE_DO_API && url.includes('blackhatworld.com') && url.includes('rss')) {
+        console.log('  [BHW-RSS] Enforcing browser fetch (No Scrape.do)...');
         return await fetchXmlViaBrowser(url, context);
     }
-    // For BHW, prefer browser if cookies are present, OR if we have a proxy and Axios fails.
-    // actually, let's try Axios with Proxy first.
 
     try {
-        const response = await axios.get(url, {
+        let reqConfig = {
             timeout: 30000,
-            proxy: AXIOS_PROXY_CONFIG, // Use the parsed proxy config
             headers: {
                 'User-Agent': DEFAULT_UA,
                 'Accept': 'application/xml,text/xml,application/rss+xml,application/atom+xml',
                 'Accept-Language': 'tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7',
                 'Referer': new URL(url).origin + '/',
                 'Cache-Control': 'no-cache',
-                'Pragma': 'no-cache',
-                'Sec-Ch-Ua': '"Not A(Brand";v="99", "Google Chrome";v="121", "Chromium";v="121"',
-                'Sec-Ch-Ua-Mobile': '?0',
-                'Sec-Ch-Ua-Platform': '"Windows"'
+                'Pragma': 'no-cache'
             }
-        });
+        };
+
+        let targetUrl = url;
+
+        if (USE_SCRAPE_DO_API && process.env.SCRAPE_DO_TOKEN) {
+            // Use Scrape.do API Gateway
+            targetUrl = `http://api.scrape.do?url=${encodeURIComponent(url)}&token=${process.env.SCRAPE_DO_TOKEN}`;
+            // Remove proxy config if using Gateway API
+            reqConfig.proxy = false;
+        } else {
+            // Use standard proxy if configured
+            reqConfig.proxy = AXIOS_PROXY_CONFIG;
+        }
+
+        const response = await axios.get(targetUrl, reqConfig);
         const text = typeof response.data === 'string' ? response.data : String(response.data);
         return extractXmlPayload(text);
     } catch (e) {
