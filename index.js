@@ -29,6 +29,8 @@ const MIN_CONTENT_LENGTH = 40;
 const MAX_CONTENT_LENGTH = 4000;
 const ALLOW_MARKETPLACE = process.env.SCRAPER_ALLOW_MARKETPLACE === '1';
 const DISABLE_JOB_FILTER = process.env.SCRAPER_DISABLE_JOB_FILTER === '1';
+const MAX_THREAD_AGE_HOURS = Number(process.env.SCRAPER_MAX_THREAD_AGE_HOURS || '24');
+const STRICT_DATE = process.env.SCRAPER_STRICT_DATE === '1';
 
 const DEFAULT_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36';
 const XML_PARSER = new XMLParser({
@@ -404,6 +406,49 @@ function countHit(patterns, text) {
 function toArray(value) {
     if (!value) return [];
     return Array.isArray(value) ? value : [value];
+}
+
+function parseThreadDate(dateText) {
+    if (!dateText) return null;
+    const text = String(dateText).trim();
+    if (!text) return null;
+
+    const lower = text.toLowerCase();
+    let base = new Date();
+    if (lower.includes('bugün') || lower.includes('today')) {
+        // today
+    } else if (lower.includes('dün') || lower.includes('yesterday')) {
+        base = new Date(Date.now() - 24 * 3600 * 1000);
+    } else {
+        const m = /(\d{1,2})[.\/-](\d{1,2})[.\/-](\d{2,4})/.exec(text);
+        if (m) {
+            const day = Number(m[1]);
+            const month = Number(m[2]) - 1;
+            let year = Number(m[3]);
+            if (year < 100) year += 2000;
+            base = new Date(year, month, day);
+        } else {
+            const parsed = new Date(text);
+            if (!isNaN(parsed)) return parsed;
+            return null;
+        }
+    }
+
+    const tm = /(\d{1,2}):(\d{2})(?::(\d{2}))?/.exec(text);
+    if (tm) {
+        base.setHours(Number(tm[1]), Number(tm[2]), Number(tm[3] || 0), 0);
+    } else {
+        base.setHours(0, 0, 0, 0);
+    }
+    return base;
+}
+
+function isTooOld(dateText) {
+    if (!MAX_THREAD_AGE_HOURS || MAX_THREAD_AGE_HOURS <= 0) return false;
+    const d = parseThreadDate(dateText);
+    if (!d) return STRICT_DATE;
+    const diffMs = Date.now() - d.getTime();
+    return diffMs > MAX_THREAD_AGE_HOURS * 3600 * 1000;
 }
 
 function parseCookieEnv(raw) {
@@ -861,9 +906,11 @@ function extractRssItems(xmlText, maxItems = 50) {
                 link = item.id;
             }
 
+            const pubDate = item.pubDate || item.published || item.updated || item.date || '';
             return {
                 title: (title || '').trim(),
-                url: (link || '').trim()
+                url: (link || '').trim(),
+                published: (pubDate || '').trim()
             };
         });
 
@@ -1304,6 +1351,48 @@ async function fetchThreadDetails(context, url, contentSelector, titleSelector, 
                 return merged;
             };
 
+            const extractDateText = () => {
+                const metaSelectors = [
+                    'meta[property="article:published_time"]',
+                    'meta[name="date"]',
+                    'meta[itemprop="datePublished"]'
+                ];
+                for (const sel of metaSelectors) {
+                    const el = document.querySelector(sel);
+                    const val = el ? (el.getAttribute('content') || '').trim() : '';
+                    if (val) return val;
+                }
+
+                const timeEl = document.querySelector('time[datetime]');
+                if (timeEl) {
+                    const val = (timeEl.getAttribute('datetime') || timeEl.innerText || '').trim();
+                    if (val) return val;
+                }
+                const timeText = document.querySelector('time');
+                if (timeText && timeText.innerText) {
+                    const val = timeText.innerText.trim();
+                    if (val) return val;
+                }
+
+                const candidates = [
+                    '.message-attribution-main time',
+                    '.message-attribution time',
+                    '.postDate',
+                    '.post-date',
+                    '.thread-date',
+                    '.message-date',
+                    '.date',
+                    '.head .left'
+                ];
+                for (const sel of candidates) {
+                    const el = document.querySelector(sel);
+                    const val = el ? (el.innerText || '').trim() : '';
+                    if (val) return val;
+                }
+
+                return '';
+            };
+
             const candidates = [];
 
             for (const sel of selectors) {
@@ -1361,9 +1450,11 @@ async function fetchThreadDetails(context, url, contentSelector, titleSelector, 
             if (signatureText) {
                 text = text + '\n\nSignature: ' + signatureText;
             }
+            const dateText = extractDateText();
             return {
                 content: text.length > maxLen ? text.slice(0, maxLen) : text,
-                title: pageTitle
+                title: pageTitle,
+                publishedAt: dateText
             };
         }, {
             selector: contentSelector,
@@ -1496,6 +1587,10 @@ async function processThreadsForSource(source, threads, context) {
         if (SEEN_URLS.has(thread.url) || pickedUrls.has(thread.url)) {
             continue;
         }
+        if (thread.published && isTooOld(thread.published)) {
+            console.log(`  [SKIP:OLD] ${(thread.title || thread.url).substring(0, 60)}...`);
+            continue;
+        }
 
         if (!DISABLE_JOB_FILTER && prefilterMode === 'strict') {
             const jobCheck = isJobTopic({
@@ -1554,6 +1649,11 @@ async function processThreadsForSource(source, threads, context) {
             }
         );
         const content = details?.content || '';
+        const publishedAt = details?.publishedAt || thread.published || '';
+        if (publishedAt && isTooOld(publishedAt)) {
+            console.log(`  [SKIP:OLD] ${(thread.title || thread.url).substring(0, 60)}...`);
+            continue;
+        }
         let finalTitle = (thread.title || '').trim() || (details?.title || '').trim();
         if (!finalTitle) {
             finalTitle = deriveTitleFromUrl(thread.url);
@@ -1880,6 +1980,11 @@ async function scrape() {
                     }
                 );
                 const content = details?.content || '';
+                const publishedAt = details?.publishedAt || '';
+                if (publishedAt && isTooOld(publishedAt)) {
+                    console.log(`  [SKIP:OLD] ${(thread.title || thread.url).substring(0, 60)}...`);
+                    continue;
+                }
                 let finalTitle = (thread.title || '').trim() || (details?.title || '').trim();
                 if (!finalTitle) {
                     finalTitle = deriveTitleFromUrl(thread.url);
