@@ -74,12 +74,6 @@ let USE_SCRAPE_DO_API = false;
 if (process.env.SCRAPE_DO_TOKEN) {
     console.log('[Proxy] Using Scrape.do API Gateway mode.');
     USE_SCRAPE_DO_API = true;
-    // For Playwright, we can use their proxy server standard
-    PLAYWRIGHT_PROXY_CONFIG = {
-        server: 'http://proxy-server.scrape.do:8080',
-        username: 'scraperapi',
-        password: process.env.SCRAPE_DO_TOKEN
-    };
 } else if (process.env.SCRAPER_PROXY) {
     try {
         const proxyUrl = new URL(process.env.SCRAPER_PROXY);
@@ -774,7 +768,7 @@ async function fetchXml(url, context, options = {}) {
 
     try {
         let reqConfig = {
-            timeout: 30000,
+            timeout: options.timeoutMs || 60000,
             headers: {
                 'User-Agent': DEFAULT_UA,
                 'Accept': 'application/xml,text/xml,application/rss+xml,application/atom+xml',
@@ -1590,14 +1584,14 @@ async function processFeedSource(feed, context) {
             feed.allowViewSource
         );
         console.log(`Fetching RSS: ${feedUrl}`);
-        const xml = await fetchXml(feedUrl, context, { useScrapeDo });
+        const xml = await fetchXml(feedUrl, context, { useScrapeDo, timeoutMs: 60000 });
         if (!xml) return;
         threads = extractRssItems(xml, feed.maxItems || 60);
         threads = cleanThreadList(threads, feedUrl);
     } else if (feed.type === 'sitemap') {
         const sitemapUrl = sanitizeFeedUrl(feed.url, feed.allowViewSource);
         console.log(`Fetching Sitemap: ${sitemapUrl}`);
-        const urls = await fetchSitemapUrls(sitemapUrl, feed.maxItems || 60, 0, context, { useScrapeDo });
+        const urls = await fetchSitemapUrls(sitemapUrl, feed.maxItems || 60, 0, context, { useScrapeDo, timeoutMs: 60000 });
         const filtered = feed.urlAllow
             ? urls.filter(u => feed.urlAllow.some(r => r.test(u)))
             : urls;
