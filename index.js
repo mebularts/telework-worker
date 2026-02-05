@@ -19,14 +19,16 @@ if (process.env.CAPTCHA_TOKEN) {
 
 const axios = require('axios');
 const { XMLParser } = require('fast-xml-parser');
+const iconv = require('iconv-lite');
 
 const WEBHOOK_URL = process.env.WEBHOOK_URL;
 const SCRAPER_TOKEN = process.env.SCRAPER_TOKEN;
 
 const MAX_THREADS_PER_SOURCE = 20;
-const MIN_CONTENT_LENGTH = 80;
+const MIN_CONTENT_LENGTH = 40;
 const MAX_CONTENT_LENGTH = 4000;
 const ALLOW_MARKETPLACE = process.env.SCRAPER_ALLOW_MARKETPLACE !== '0';
+const DISABLE_JOB_FILTER = process.env.SCRAPER_DISABLE_JOB_FILTER === '1';
 
 const DEFAULT_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36';
 const XML_PARSER = new XMLParser({
@@ -240,6 +242,7 @@ const SOURCES = [
         threadSelector: '.thread .title a, #tab-sonAcilan .list ul li.thread .title a, a[id^="thread_title_"]',
         contentSelector: CONTENT_SELECTORS.r10,
         maxThreads: 20,
+        minContentLength: 40,
         useScrapeDo: true,
         useScrapeDoApi: true
     },
@@ -250,6 +253,7 @@ const SOURCES = [
         threadSelector: '.forumLastSubject .content ul li.open span a[href*="/forum/"]',
         contentSelector: CONTENT_SELECTORS.wmaraci,
         maxThreads: 20,
+        minContentLength: 60,
         useScrapeDo: false,
         useScrapeDoApi: false
     },
@@ -260,6 +264,7 @@ const SOURCES = [
         threadSelector: '.structItem-title a, .block-row .contentRow-title a',
         contentSelector: CONTENT_SELECTORS.bhw,
         maxThreads: 20,
+        minContentLength: 40,
         useScrapeDo: true,
         useScrapeDoApi: true
     }
@@ -276,6 +281,7 @@ const FEED_SOURCES = [
         prefilter: 'title',
         maxThreads: 20,
         maxItems: 20,
+        minContentLength: 40,
         useScrapeDo: true
     },
     {
@@ -287,6 +293,7 @@ const FEED_SOURCES = [
         prefilter: 'title',
         maxThreads: 20,
         maxItems: 20,
+        minContentLength: 60,
         useScrapeDo: false
     },
     {
@@ -299,6 +306,7 @@ const FEED_SOURCES = [
         prefilter: 'title',
         maxThreads: 20,
         maxItems: 20,
+        minContentLength: 40,
         useScrapeDo: true
     }
 ];
@@ -561,6 +569,48 @@ function extractXmlPayload(text) {
     return text;
 }
 
+function detectCharsetFromHeaders(headers) {
+    if (!headers) return '';
+    const ct = headers['content-type'] || headers['Content-Type'] || '';
+    const m = /charset=([^;]+)/i.exec(ct);
+    return m ? m[1].trim().toLowerCase() : '';
+}
+
+function detectCharsetFromMeta(text) {
+    if (!text) return '';
+    let m = /<meta[^>]+charset=["']?([^"'>\s;]+)/i.exec(text);
+    if (m && m[1]) return m[1].trim().toLowerCase();
+    m = /<meta[^>]+http-equiv=["']content-type["'][^>]+content=["'][^"']*charset=([^"'>\s;]+)/i.exec(text);
+    return m && m[1] ? m[1].trim().toLowerCase() : '';
+}
+
+function normalizeCharset(charset) {
+    if (!charset) return '';
+    const c = charset.toLowerCase();
+    if (c === 'utf8') return 'utf-8';
+    if (c === 'iso-8859-9' || c === 'latin5') return 'windows-1254';
+    return c;
+}
+
+function decodeResponseBody(data, headers) {
+    if (!data) return '';
+    if (typeof data === 'string') return data;
+    const buffer = Buffer.isBuffer(data) ? data : Buffer.from(data);
+    let charset = normalizeCharset(detectCharsetFromHeaders(headers));
+    if (!charset) {
+        const sniff = buffer.toString('latin1');
+        charset = normalizeCharset(detectCharsetFromMeta(sniff));
+    }
+    if (!charset || !iconv.encodingExists(charset)) {
+        charset = 'utf-8';
+    }
+    try {
+        return iconv.decode(buffer, charset);
+    } catch {
+        return buffer.toString('utf8');
+    }
+}
+
 async function fetchXmlViaBrowser(url, context) {
     if (!context) return null;
     const normalizedUrl = (url || '').trim();
@@ -675,8 +725,9 @@ async function fetchXml(url, context, options = {}) {
             reqConfig.proxy = false;
         }
 
+        reqConfig.responseType = 'arraybuffer';
         const response = await axios.get(targetUrl, reqConfig);
-        const text = typeof response.data === 'string' ? response.data : String(response.data);
+        const text = decodeResponseBody(response.data, response.headers);
         return extractXmlPayload(text);
     } catch (e) {
         console.warn(`  [!] XML fetch failed: ${normalizedUrl} -> ${e.message.split('\n')[0]}`);
@@ -686,14 +737,26 @@ async function fetchXml(url, context, options = {}) {
 
 async function fetchHtmlViaScrapeDo(url) {
     if (!process.env.SCRAPE_DO_TOKEN) return null;
-    try {
-        const targetUrl = `http://api.scrape.do?url=${encodeURIComponent(url)}&token=${process.env.SCRAPE_DO_TOKEN}`;
-        const response = await axios.get(targetUrl, { timeout: 60000 });
-        return typeof response.data === 'string' ? response.data : String(response.data);
-    } catch (e) {
-        console.warn(`  [!] Scrape.do HTML fetch failed: ${url} -> ${e.message}`);
-        return null;
+    const targetUrl = `http://api.scrape.do?url=${encodeURIComponent(url)}&token=${process.env.SCRAPE_DO_TOKEN}`;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+            const response = await axios.get(targetUrl, {
+                timeout: 60000,
+                responseType: 'arraybuffer',
+                headers: { 'User-Agent': DEFAULT_UA }
+            });
+            return decodeResponseBody(response.data, response.headers);
+        } catch (e) {
+            const status = e?.response?.status;
+            if (attempt < 2 && status && status >= 500) {
+                await new Promise(r => setTimeout(r, 1200));
+                continue;
+            }
+            console.warn(`  [!] Scrape.do HTML fetch failed: ${url} -> ${e.message}`);
+            return null;
+        }
     }
+    return null;
 }
 
 function extractRssItems(xmlText, maxItems = 50) {
@@ -1068,6 +1131,8 @@ async function fetchThreadDetails(context, url, contentSelector, titleSelector, 
     const page = await context.newPage();
     try {
         const useScrapeDo = options.useScrapeDo ?? USE_SCRAPE_DO_API;
+        const minLen = Number(options.minContentLength || MIN_CONTENT_LENGTH);
+        const maxLen = Number(options.maxContentLength || MAX_CONTENT_LENGTH);
         let usedContent = false;
         if (useScrapeDo && USE_SCRAPE_DO_API) {
             const html = await fetchHtmlViaScrapeDo(url);
@@ -1169,8 +1234,8 @@ async function fetchThreadDetails(context, url, contentSelector, titleSelector, 
         }, {
             selector: contentSelector,
             titleSelector,
-            minLen: MIN_CONTENT_LENGTH,
-            maxLen: MAX_CONTENT_LENGTH
+            minLen,
+            maxLen
         });
 
         return details;
@@ -1291,13 +1356,14 @@ async function processThreadsForSource(source, threads, context) {
     const prefilterMode = source.prefilter || 'smart';
 
     const prefiltered = [];
+    const pickedUrls = new Set();
     for (const thread of threads) {
         if (!thread.url) continue;
-        if (SEEN_URLS.has(thread.url)) {
+        if (SEEN_URLS.has(thread.url) || pickedUrls.has(thread.url)) {
             continue;
         }
 
-        if (prefilterMode === 'strict') {
+        if (!DISABLE_JOB_FILTER && prefilterMode === 'strict') {
             const jobCheck = isJobTopic({
                 title: thread.title,
                 content: '',
@@ -1309,7 +1375,7 @@ async function processThreadsForSource(source, threads, context) {
                 console.log(`  [SKIP:NOTJOB] ${(thread.title || thread.url).substring(0, 60)}...`);
                 continue;
             }
-        } else if (prefilterMode === 'smart') {
+        } else if (!DISABLE_JOB_FILTER && prefilterMode === 'smart') {
             if (shouldPrefilterSkip({
                 title: thread.title,
                 url: thread.url,
@@ -1322,7 +1388,7 @@ async function processThreadsForSource(source, threads, context) {
         }
 
         prefiltered.push(thread);
-        SEEN_URLS.add(thread.url);
+        pickedUrls.add(thread.url);
 
         if (prefiltered.length >= maxThreads) {
             break;
@@ -1341,7 +1407,16 @@ async function processThreadsForSource(source, threads, context) {
     for (const thread of prefiltered) {
         await new Promise(resolve => setTimeout(resolve, 600));
 
-        const details = await fetchThreadDetails(context, thread.url, source.contentSelector, source.titleSelector, { useScrapeDo: source.useScrapeDo });
+        const details = await fetchThreadDetails(
+            context,
+            thread.url,
+            source.contentSelector,
+            source.titleSelector,
+            {
+                useScrapeDo: source.useScrapeDo,
+                minContentLength: source.minContentLength
+            }
+        );
         const content = details?.content || '';
         let finalTitle = (thread.title || '').trim() || (details?.title || '').trim();
         if (!finalTitle) {
@@ -1353,20 +1428,24 @@ async function processThreadsForSource(source, threads, context) {
             continue;
         }
 
-        if (content && content.length >= MIN_CONTENT_LENGTH) {
-            const jobCheck = isJobTopic({
-                title: finalTitle,
-                content,
-                url: thread.url,
-                prefix: thread.prefix,
-                forum: thread.forum
-            });
-            if (!jobCheck.isJob) {
-                console.log(`  [SKIP:NOTJOB] ${finalTitle.substring(0, 60)}...`);
-                continue;
+        const minLen = Number(source.minContentLength || MIN_CONTENT_LENGTH);
+        if (content && content.length >= minLen) {
+            if (!DISABLE_JOB_FILTER) {
+                const jobCheck = isJobTopic({
+                    title: finalTitle,
+                    content,
+                    url: thread.url,
+                    prefix: thread.prefix,
+                    forum: thread.forum
+                });
+                if (!jobCheck.isJob) {
+                    console.log(`  [SKIP:NOTJOB] ${finalTitle.substring(0, 60)}...`);
+                    continue;
+                }
             }
             enrichedThreads.push({ ...thread, title: finalTitle, original_content: content });
             console.log(`  [OK] ${finalTitle.substring(0, 60)}...`);
+            SEEN_URLS.add(thread.url);
         } else {
             console.log(`  [SKIP:NOCONTENT] ${finalTitle.substring(0, 60)}...`);
         }
@@ -1636,6 +1715,7 @@ async function scrape() {
             await mainPage.close();
 
             const prefilteredThreads = [];
+            const pickedUrls = new Set();
             let skippedCount = 0;
             const maxThreads = source.maxThreads || MAX_THREADS_PER_SOURCE;
             for (const thread of threads) {
@@ -1645,18 +1725,20 @@ async function scrape() {
                     break;
                 }
 
-                if (SEEN_URLS.has(thread.url)) {
+                if (SEEN_URLS.has(thread.url) || pickedUrls.has(thread.url)) {
                     skippedCount++;
                     continue;
                 }
                 skippedCount = 0; // reset if we find a new one
 
-                if (shouldPrefilterSkip({ title: thread.title, url: thread.url })) {
-                    console.log(`  [SKIP:PREFILTER] ${thread.title}`);
-                    continue;
+                if (!DISABLE_JOB_FILTER) {
+                    if (shouldPrefilterSkip({ title: thread.title, url: thread.url })) {
+                        console.log(`  [SKIP:PREFILTER] ${thread.title}`);
+                        continue;
+                    }
                 }
                 prefilteredThreads.push(thread);
-                SEEN_URLS.add(thread.url);
+                pickedUrls.add(thread.url);
                 if (prefilteredThreads.length >= maxThreads) {
                     break;
                 }
@@ -1670,21 +1752,34 @@ async function scrape() {
                 // Add delay between requests
                 await new Promise(resolve => setTimeout(resolve, 600));
 
-                const details = await fetchThreadDetails(activeContext, thread.url, source.contentSelector, source.titleSelector, { useScrapeDo: source.useScrapeDo });
+                const details = await fetchThreadDetails(
+                    activeContext,
+                    thread.url,
+                    source.contentSelector,
+                    source.titleSelector,
+                    {
+                        useScrapeDo: source.useScrapeDo,
+                        minContentLength: source.minContentLength
+                    }
+                );
                 const content = details?.content || '';
                 let finalTitle = (thread.title || '').trim() || (details?.title || '').trim();
                 if (!finalTitle) {
                     finalTitle = deriveTitleFromUrl(thread.url);
                 }
 
-                if (content && content.length >= MIN_CONTENT_LENGTH) {
-                    const jobCheck = isJobTopic({ title: finalTitle, content, url: thread.url });
-                    if (!jobCheck.isJob) {
-                        console.log(`  [SKIP:NOTJOB] ${thread.title.substring(0, 60)}...`);
-                        continue;
+                const minLen = Number(source.minContentLength || MIN_CONTENT_LENGTH);
+                if (content && content.length >= minLen) {
+                    if (!DISABLE_JOB_FILTER) {
+                        const jobCheck = isJobTopic({ title: finalTitle, content, url: thread.url });
+                        if (!jobCheck.isJob) {
+                            console.log(`  [SKIP:NOTJOB] ${thread.title.substring(0, 60)}...`);
+                            continue;
+                        }
                     }
                     enrichedThreads.push({ ...thread, title: finalTitle, original_content: content });
                     console.log(`  [OK] ${finalTitle.substring(0, 60)}...`);
+                    SEEN_URLS.add(thread.url);
                 } else {
                     console.log(`  [SKIP:NOCONTENT] ${thread.title.substring(0, 60)}...`);
                 }
