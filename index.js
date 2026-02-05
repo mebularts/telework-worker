@@ -20,6 +20,7 @@ if (process.env.CAPTCHA_TOKEN) {
 const axios = require('axios');
 const { XMLParser } = require('fast-xml-parser');
 const iconv = require('iconv-lite');
+const cheerio = require('cheerio');
 
 const WEBHOOK_URL = process.env.WEBHOOK_URL;
 const SCRAPER_TOKEN = process.env.SCRAPER_TOKEN;
@@ -31,6 +32,15 @@ const ALLOW_MARKETPLACE = process.env.SCRAPER_ALLOW_MARKETPLACE === '1';
 const DISABLE_JOB_FILTER = process.env.SCRAPER_DISABLE_JOB_FILTER === '1';
 const MAX_THREAD_AGE_HOURS = Number(process.env.SCRAPER_MAX_THREAD_AGE_HOURS || '24');
 const STRICT_DATE = process.env.SCRAPER_STRICT_DATE === '1';
+const UPWORK_ENABLED = process.env.UPWORK_ENABLED === '1';
+const UPWORK_MAX_CATEGORIES = Number(process.env.UPWORK_MAX_CATEGORIES || '10');
+const UPWORK_MAX_JOBS_PER_CATEGORY = Number(process.env.UPWORK_MAX_JOBS_PER_CATEGORY || '50');
+const UPWORK_DELAY_MS = Number(process.env.UPWORK_DELAY_MS || '1200');
+const UPWORK_CATEGORY_SLUGS = (process.env.UPWORK_CATEGORY_SLUGS || '')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean);
+const UPWORK_USE_SCRAPE_DO = process.env.UPWORK_USE_SCRAPE_DO === '1';
 
 const DEFAULT_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36';
 const XML_PARSER = new XMLParser({
@@ -403,6 +413,10 @@ function countHit(patterns, text) {
     return count;
 }
 
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 function toArray(value) {
     if (!value) return [];
     return Array.isArray(value) ? value : [value];
@@ -722,6 +736,325 @@ function decodeResponseBody(data, headers) {
         return iconv.decode(buffer, charset);
     } catch {
         return buffer.toString('utf8');
+    }
+}
+
+function isUpworkBlockedHtml(html) {
+    if (!html) return true;
+    const lower = html.toLowerCase();
+    if (lower.includes('up-challenge-container')) return true;
+    if (lower.includes('cf-chl') || lower.includes('cloudflare')) return true;
+    if (lower.includes('enable javascript') && lower.includes('cookies')) return true;
+    if (lower.includes('challenge - upwork')) return true;
+    return false;
+}
+
+async function fetchHtmlViaBrowser(url, context) {
+    if (!context) return null;
+    const page = await context.newPage();
+    try {
+        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+        await handleAntiBot(page);
+        await page.waitForTimeout(1500);
+        return await page.content();
+    } catch (e) {
+        console.warn(`  [Upwork] Browser fetch failed: ${e.message.split('\n')[0]}`);
+        return null;
+    } finally {
+        await page.close().catch(() => { });
+    }
+}
+
+async function fetchUpworkHtml(url, context, options = {}) {
+    const timeoutMs = Number(options.timeoutMs || 60000);
+    const retries = Number(options.retries ?? 2);
+    const backoffBaseMs = Number(options.backoffBaseMs ?? 1200);
+    const useScrapeDo = options.useScrapeDo ?? (UPWORK_USE_SCRAPE_DO || USE_SCRAPE_DO_API);
+
+    const headers = {
+        'User-Agent': DEFAULT_UA,
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9,tr;q=0.8',
+        'Cache-Control': 'no-cache',
+        'Pragma': 'no-cache'
+    };
+
+    if (useScrapeDo && process.env.SCRAPE_DO_TOKEN) {
+        const html = await fetchHtmlViaScrapeDo(url);
+        if (html && !isUpworkBlockedHtml(html)) {
+            return html;
+        }
+    }
+
+    for (let attempt = 0; attempt <= retries; attempt++) {
+        try {
+            const reqConfig = {
+                timeout: timeoutMs,
+                headers,
+                responseType: 'arraybuffer'
+            };
+            if (useScrapeDo && !USE_SCRAPE_DO_API) {
+                reqConfig.proxy = AXIOS_PROXY_CONFIG;
+            } else {
+                reqConfig.proxy = false;
+            }
+
+            const response = await axios.get(url, reqConfig);
+            const html = decodeResponseBody(response.data, response.headers);
+            if (!html) throw new Error('empty response');
+            if (isUpworkBlockedHtml(html)) throw new Error('blocked');
+            return html;
+        } catch (e) {
+            const status = e?.response?.status;
+            const retryable = status === 429 || (status >= 500 && status <= 599) || !status;
+            if (attempt < retries && retryable) {
+                const waitMs = backoffBaseMs * Math.pow(2, attempt);
+                console.warn(`  [Upwork] Retry ${attempt + 1}/${retries} in ${waitMs}ms: ${e.message.split('\n')[0]}`);
+                await sleep(waitMs);
+                continue;
+            }
+            break;
+        }
+    }
+
+    const html = await fetchHtmlViaBrowser(url, context);
+    if (html && !isUpworkBlockedHtml(html)) {
+        return html;
+    }
+    return null;
+}
+
+function normalizeUpworkSlug(raw) {
+    if (!raw) return '';
+    const text = String(raw).trim();
+    if (!text) return '';
+
+    try {
+        const u = new URL(text);
+        const m = u.pathname.match(/\/freelance-jobs\/([^/]+)\/?/i);
+        if (m) return m[1].trim();
+    } catch {
+        // ignore
+    }
+
+    const m = text.match(/freelance-jobs\/([^/]+)\/?/i);
+    if (m) return m[1].trim();
+    return text.replace(/^\/+|\/+$/g, '').trim();
+}
+
+function parseUpworkCategorySlugs(html) {
+    if (!html) return [];
+    const $ = cheerio.load(html);
+    const slugs = new Set();
+
+    $('a[href^="/freelance-jobs/"], a[href^="https://www.upwork.com/freelance-jobs/"]').each((_, el) => {
+        const href = ($(el).attr('href') || '').trim();
+        if (!href) return;
+        if (href.includes('/freelance-jobs/apply/')) return;
+
+        let path = href;
+        try {
+            if (href.startsWith('http')) {
+                const u = new URL(href);
+                path = u.pathname || href;
+            }
+        } catch {
+            // ignore
+        }
+
+        const m = path.match(/^\/freelance-jobs\/([^/]+)\/?$/i);
+        if (m && m[1]) {
+            slugs.add(m[1].trim());
+        }
+    });
+
+    return Array.from(slugs);
+}
+
+function parseUpworkJobsFromCategoryHtml(html, categorySlug) {
+    if (!html) return [];
+    const $ = cheerio.load(html);
+    const jobs = [];
+
+    const cleanText = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+    const uniq = (arr) => Array.from(new Set(arr.filter(Boolean)));
+
+    $('section[data-qa="job-tile"]').each((_, el) => {
+        const tile = $(el);
+        const titleEl = tile.find('a[data-qa="job-title"]').first();
+        const title = cleanText(titleEl.text());
+        let url = cleanText(titleEl.attr('href') || '');
+        if (url && url.startsWith('/')) {
+            url = `https://www.upwork.com${url}`;
+        }
+
+        const description = cleanText(tile.find('p[data-qa="job-description"]').first().text());
+        const badgeText = cleanText(tile.find('.air3-badge-feature').first().text());
+        const isNew = badgeText.toLowerCase() === 'new';
+
+        const smallTexts = tile.find('small').map((i, s) => cleanText($(s).text())).get().filter(Boolean);
+        const postedText = smallTexts.find(t => /posted/i.test(t)) || '';
+        const jobType = smallTexts.find(t => /hourly|fixed/i.test(t)) || (smallTexts[0] || '');
+
+        const hoursNeeded = cleanText(tile.find('div[data-qa="hours-needed"] strong[data-qa="value"]').first().text());
+        const duration = cleanText(tile.find('div[data-qa="duration"] strong[data-qa="value"]').first().text());
+        const experienceLevel = cleanText(tile.find('div[data-qa="expert-level"] strong[data-qa="value"]').first().text());
+
+        const skills = uniq(tile.find('span[data-qa="ontology-skill"], span[data-qa="legacy-skill"]').map((i, s) => cleanText($(s).text())).get());
+
+        let budget = '';
+        const fixedPrice = tile.find('small[data-qa="fixed-price"]').first();
+        if (fixedPrice.length > 0) {
+            budget = cleanText(fixedPrice.parent().find('strong').first().text());
+        }
+        if (!budget) {
+            const m = tile.text().match(/\$\s?\d[\d,]*(?:\.\d+)?/);
+            if (m) budget = cleanText(m[0]);
+        }
+
+        let externalId = '';
+        if (url) {
+            const idMatch = url.match(/_~([0-9a-zA-Z]+)/) || url.match(/~([0-9a-zA-Z]+)/);
+            externalId = idMatch ? idMatch[1] : '';
+        }
+
+        if (!title || !url) return;
+
+        jobs.push({
+            source: 'upwork',
+            category: categorySlug || '',
+            title,
+            url,
+            externalId,
+            isNew,
+            jobType,
+            postedText,
+            hoursNeeded,
+            duration,
+            experienceLevel,
+            budget,
+            description,
+            skills
+        });
+    });
+
+    return jobs;
+}
+
+function buildUpworkJobContent(job) {
+    const parts = [];
+    if (job.description) parts.push(job.description);
+    if (job.jobType) parts.push(`Type: ${job.jobType}`);
+    if (job.postedText) parts.push(`Posted: ${job.postedText}`);
+    if (job.budget) parts.push(`Budget: ${job.budget}`);
+    if (job.hoursNeeded) parts.push(`Hours: ${job.hoursNeeded}`);
+    if (job.duration) parts.push(`Duration: ${job.duration}`);
+    if (job.experienceLevel) parts.push(`Experience: ${job.experienceLevel}`);
+    if (job.skills && job.skills.length > 0) parts.push(`Skills: ${job.skills.join(', ')}`);
+    if (job.category) parts.push(`Category: ${job.category}`);
+    return parts.join('\n').trim();
+}
+
+async function scrapeUpwork(context) {
+    if (!UPWORK_ENABLED) return;
+    console.log('\n=== UPWORK ===');
+
+    const maxCategories = Number.isFinite(UPWORK_MAX_CATEGORIES) && UPWORK_MAX_CATEGORIES > 0 ? UPWORK_MAX_CATEGORIES : 10;
+    const maxJobsPerCategory = Number.isFinite(UPWORK_MAX_JOBS_PER_CATEGORY) && UPWORK_MAX_JOBS_PER_CATEGORY > 0 ? UPWORK_MAX_JOBS_PER_CATEGORY : 50;
+    const delayMs = Number.isFinite(UPWORK_DELAY_MS) && UPWORK_DELAY_MS >= 0 ? UPWORK_DELAY_MS : 1200;
+
+    let slugs = [];
+    if (UPWORK_CATEGORY_SLUGS.length > 0) {
+        slugs = UPWORK_CATEGORY_SLUGS.map(normalizeUpworkSlug).filter(Boolean);
+    } else {
+        const categoriesUrl = 'https://www.upwork.com/freelance-jobs/';
+        console.log(`Fetching categories: ${categoriesUrl}`);
+        const html = await fetchUpworkHtml(categoriesUrl, context, { retries: 2, backoffBaseMs: 1200 });
+        if (!html) {
+            console.warn('  [Upwork] Categories page blocked or empty.');
+            return;
+        }
+        slugs = parseUpworkCategorySlugs(html);
+    }
+
+    const categoriesFound = slugs.length;
+    if (categoriesFound === 0) {
+        console.warn('  [Upwork] No categories found.');
+        return;
+    }
+
+    const targets = slugs.slice(0, maxCategories);
+    console.log(`Categories found: ${categoriesFound}. Crawling: ${targets.length}`);
+
+    const jobsToSend = [];
+    const seenLocal = new Set();
+    let jobsParsed = 0;
+    let duplicatesSkipped = 0;
+    let blockedPages = 0;
+
+    for (const slug of targets) {
+        if (delayMs > 0) await sleep(delayMs);
+        const categoryUrl = `https://www.upwork.com/freelance-jobs/${slug}/`;
+        console.log(`  [Upwork] Fetching: ${categoryUrl}`);
+
+        const html = await fetchUpworkHtml(categoryUrl, context, { retries: 2, backoffBaseMs: 1200 });
+        if (!html) {
+            blockedPages += 1;
+            console.warn(`  [Upwork] Blocked/empty: ${slug}`);
+            continue;
+        }
+
+        const parsed = parseUpworkJobsFromCategoryHtml(html, slug);
+        jobsParsed += parsed.length;
+
+        const limited = parsed.slice(0, maxJobsPerCategory);
+        for (const job of limited) {
+            if (!job.url || !job.title) continue;
+            if (SEEN_URLS.has(job.url) || seenLocal.has(job.url)) {
+                duplicatesSkipped += 1;
+                continue;
+            }
+            seenLocal.add(job.url);
+            SEEN_URLS.add(job.url);
+
+            let content = buildUpworkJobContent(job);
+            if (content.length > MAX_CONTENT_LENGTH) {
+                content = content.slice(0, MAX_CONTENT_LENGTH);
+            }
+
+            jobsToSend.push({
+                title: job.title,
+                url: job.url,
+                original_content: content,
+                source: 'upwork',
+                category: job.category,
+                meta: {
+                    externalId: job.externalId,
+                    isNew: job.isNew,
+                    jobType: job.jobType,
+                    postedText: job.postedText,
+                    hoursNeeded: job.hoursNeeded,
+                    duration: job.duration,
+                    experienceLevel: job.experienceLevel,
+                    budget: job.budget,
+                    skills: job.skills
+                }
+            });
+        }
+    }
+
+    console.log(`Upwork parsed: ${jobsParsed}, ready: ${jobsToSend.length}, duplicates: ${duplicatesSkipped}, blocked: ${blockedPages}`);
+
+    if (jobsToSend.length > 0) {
+        await axios.post(WEBHOOK_URL, {
+            type: 'external_crawl',
+            token: SCRAPER_TOKEN,
+            source: 'upwork',
+            data: jobsToSend
+        });
+        console.log(`Pushed ${jobsToSend.length} Upwork items to webhook.`);
+    } else {
+        console.log('No Upwork items to push.');
     }
 }
 
@@ -2044,6 +2377,13 @@ async function scrape() {
     }
 
     await scrapeFeedSources(context, directContext);
+    if (UPWORK_ENABLED) {
+        try {
+            await scrapeUpwork(context);
+        } catch (e) {
+            console.error(`[UPWORK] Error: ${e.message.split('\n')[0]}`);
+        }
+    }
 
     saveSeenUrls();
     if (directBrowser) {
@@ -2053,4 +2393,11 @@ async function scrape() {
     console.log("\n=== Scrape finished ===");
 }
 
-scrape();
+if (require.main === module) {
+    scrape();
+}
+
+module.exports = {
+    parseUpworkCategorySlugs,
+    parseUpworkJobsFromCategoryHtml
+};
