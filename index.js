@@ -27,7 +27,7 @@ const SCRAPER_TOKEN = process.env.SCRAPER_TOKEN;
 const MAX_THREADS_PER_SOURCE = 20;
 const MIN_CONTENT_LENGTH = 40;
 const MAX_CONTENT_LENGTH = 4000;
-const ALLOW_MARKETPLACE = process.env.SCRAPER_ALLOW_MARKETPLACE !== '0';
+const ALLOW_MARKETPLACE = process.env.SCRAPER_ALLOW_MARKETPLACE === '1';
 const DISABLE_JOB_FILTER = process.env.SCRAPER_DISABLE_JOB_FILTER === '1';
 
 const DEFAULT_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36';
@@ -112,6 +112,7 @@ if (process.env.SCRAPE_DO_TOKEN) {
 const JOB_URL_HINTS = [
     '/is-ilan', '/is-ilani', '/is-ilanlari',
     '/is-arayan', '/is-veren', '/isveren',
+    '/is-verenler', '/is-verenler/', '/is-verenler',
     '/freelance', '/freelancer',
     '/proje', '/project',
     '/hizmet-alim', '/hizmet-alimi',
@@ -140,7 +141,27 @@ const JOB_POSITIVE_STRONG_PATTERNS = [
     /\bihtiyac\b/i,
     /\bihtiyacim\b/i,
     /\byaptirilacak\b/i,
-    /\byaptirilir\b/i
+    /\byaptirilir\b/i,
+    /\byaptirilacaktir\b/i,
+    /\bistiyorum\b/i,
+    /\bi̇stiyorum\b/i,
+    /\bistiyoruz\b/i,
+    /\bgerekli\b/i,
+    /\blazim\b/i,
+    /\blazım\b/i,
+    /\bihtiyacimiz\b/i,
+    /\bihtiyacımız\b/i,
+    /\bihtiyacim\b/i,
+    /\bihtiyacım\b/i,
+    /\bvar mi\b/i,
+    /\bvar mı\b/i,
+    /\b(biri|birisi)\s+var\s+m[ıi]\b/i,
+    /\byapabilecek\b/i,
+    /\byapabilecek\s+biri\b/i,
+    /\byardimci\s+olacak\b/i,
+    /\byardımcı\s+olacak\b/i,
+    /\bteklif\b/i,
+    /\bfiyat\s+teklifi\b/i
 ];
 
 const JOB_POSITIVE_WEAK_PATTERNS = [
@@ -162,6 +183,50 @@ const JOB_POSITIVE_WEAK_PATTERNS = [
     /\bhesap\b/i
 ];
 
+const REQ_TR = [
+    /\byapt[ıi]r(mak|aca[kğ]|ilacak)\b/i,
+    /\bihtiya[çc]\b/i,
+    /\baran[ıi]yor\b/i,
+    /\bteklif\b/i,
+    /\bfiyat teklifi\b/i,
+    /\bb[uü]t[çc]e\b/i,
+    /\bacil\b/i,
+    /\b(yapabilecek|yard[ıi]mc[ıi])\b/i,
+    /\b(al[ıi]nacak|aran[ıi]yor|aran[ıi]r)\b/i
+];
+
+const OFF_TR = [
+    /\bsat[ıi]l[ıi]k\b/i,
+    /\bsat[ıi]yorum\b/i,
+    /\bhizmet veriyorum\b/i,
+    /\bsunuyorum\b/i,
+    /\bpaket(ler)?im\b/i,
+    /\bindirim\b/i,
+    /\bkampanya\b/i,
+    /\blisans(l[ıi])?\b/i,
+    /\bscript sat[ıi]/i,
+    /\bhaz[ıi]r sistem\b/i
+];
+
+const REQ_EN = [
+    /\blooking for\b/i,
+    /\bneed (a|an)\b/i,
+    /\bhiring\b/i,
+    /\bseeking\b/i,
+    /\bwanted\b/i,
+    /\bwtb\b/i,
+    /\blf\b/i
+];
+
+const OFF_EN = [
+    /\bi will\b/i,
+    /\boffering\b/i,
+    /\bfor sale\b/i,
+    /\bservice\b/i,
+    /\bwts\b/i,
+    /\bfor hire\b/i
+];
+
 const JOB_NEGATIVE_STRONG_PATTERNS = [
     /\bsatilik\b/i,
     /\bsatiyorum\b/i,
@@ -174,12 +239,12 @@ const JOB_NEGATIVE_STRONG_PATTERNS = [
     /\bbozum\b/i,
     /\bbozdur\b/i,
     /\bbozdurma\b/i,
-    //    /\breklam\b/i, // Moved to weak
-    //    /\btanitim\b/i, // Moved to weak
+    /\breklam\b/i,
+    /\btanitim\b/i,
     /\bkampanya\b/i,
     /\bindirim\b/i,
     /\bfirsat\b/i,
-    //    /\bpaket\b/i, // Too aggressive
+    /\bpaket\b/i,
     /\bbayilik\b/i,
     /\bkupon\b/i,
     /\bpromosyon\b/i,
@@ -189,7 +254,7 @@ const JOB_NEGATIVE_STRONG_PATTERNS = [
     /\bstok\b/i,
     /\btoplu\b/i,
     /\bsponsor\b/i,
-    //    /\bhizmetleri\b/i, // Too aggressive
+    /\bhizmetleri\b/i,
     //    /\bcozumleri\b/i, // Too aggressive
     //    /\bpaketleri\b/i, // Too aggressive
     //    /\bsatisi\b/i, // Too aggressive
@@ -323,6 +388,16 @@ function normalizeText(input) {
 }
 
 function countMatches(patterns, text) {
+    let count = 0;
+    for (const pattern of patterns) {
+        if (pattern.test(text)) {
+            count += 1;
+        }
+    }
+    return count;
+}
+
+function countHit(patterns, text) {
     let count = 0;
     for (const pattern of patterns) {
         if (pattern.test(text)) {
@@ -964,6 +1039,38 @@ function analyzeJobSignals({ title, content, url, prefix, forum }) {
     };
 }
 
+function classifyTopic({ title, content, url, prefix, forum, sourceName }) {
+    const s = analyzeJobSignals({ title, content, url, prefix, forum });
+    const text = s.combined;
+    const norm = s.normalized;
+
+    const reqHits = countHit(REQ_TR, norm) + countHit(REQ_EN, text);
+    const offHits = countHit(OFF_TR, norm) + countHit(OFF_EN, text);
+
+    let score = 0;
+    score += s.posStrong * 3;
+    score += s.posWeak * 1;
+    score += reqHits * 3;
+
+    score -= s.negStrong * 3;
+    score -= s.negWeak * 1;
+    score -= offHits * 3;
+
+    if (s.urlHit) score += 1;
+    if (s.prefixDemand) score += 2;
+    if (s.prefixSupply) score -= 2;
+
+    if (s.hasCurrency) score += 0.5;
+    if (s.hasContact) score += 0.5;
+
+    if (sourceName === 'bhw' && offHits > 0) score -= 2;
+
+    if (score >= 4) return { label: 'JOB_REQUEST', score };
+    if (score <= -4) return { label: 'SERVICE_OFFER', score };
+
+    return { label: 'UNKNOWN', score };
+}
+
 function isJobTopic({ title, content, url, prefix, forum }) {
     const s = analyzeJobSignals({ title, content, url, prefix, forum });
 
@@ -1029,11 +1136,7 @@ function shouldPrefilterSkip({ title, url, prefix, forum }) {
     const supplyScore = s.negStrong + (s.prefixSupply ? 1 : 0);
 
     if (demandScore > 0 && supplyScore > 0) {
-        // This block usually not reached due to above logic, but for safety:
-        return {
-            isJob: false,
-            reason: `mixed-strict: demand:${demandScore},supply:${supplyScore}`
-        };
+        return false;
     }
 
     if (supplyScore > 0) {
@@ -1044,6 +1147,14 @@ function shouldPrefilterSkip({ title, url, prefix, forum }) {
         return true;
     }
 
+    return false;
+}
+
+function shouldPrefilterSkipSmart(input) {
+    const c = classifyTopic(input);
+    if (c.label === 'SERVICE_OFFER' && c.score <= -6) {
+        return true;
+    }
     return false;
 }
 
@@ -1376,13 +1487,15 @@ async function processThreadsForSource(source, threads, context) {
                 continue;
             }
         } else if (!DISABLE_JOB_FILTER && prefilterMode === 'smart') {
-            if (shouldPrefilterSkip({
+            if (shouldPrefilterSkipSmart({
                 title: thread.title,
+                content: '',
                 url: thread.url,
                 prefix: thread.prefix,
-                forum: thread.forum
+                forum: thread.forum,
+                sourceName: source.emitAs || source.name
             })) {
-                console.log(`  [SKIP:NOTJOB] ${(thread.title || thread.url).substring(0, 60)}...`);
+                console.log(`  [SKIP:OFFER] ${(thread.title || thread.url).substring(0, 60)}...`);
                 continue;
             }
         }
@@ -1431,15 +1544,16 @@ async function processThreadsForSource(source, threads, context) {
         const minLen = Number(source.minContentLength || MIN_CONTENT_LENGTH);
         if (content && content.length >= minLen) {
             if (!DISABLE_JOB_FILTER) {
-                const jobCheck = isJobTopic({
+                const cls = classifyTopic({
                     title: finalTitle,
                     content,
                     url: thread.url,
                     prefix: thread.prefix,
-                    forum: thread.forum
+                    forum: thread.forum,
+                    sourceName: source.emitAs || source.name
                 });
-                if (!jobCheck.isJob) {
-                    console.log(`  [SKIP:NOTJOB] ${finalTitle.substring(0, 60)}...`);
+                if (cls.label === 'SERVICE_OFFER') {
+                    console.log(`  [SKIP:${cls.label}] ${finalTitle.substring(0, 60)}... score:${cls.score}`);
                     continue;
                 }
             }
@@ -1521,33 +1635,6 @@ async function scrape() {
     if (!WEBHOOK_URL || !SCRAPER_TOKEN) {
         console.error("Missing WEBHOOK_URL or SCRAPER_TOKEN!");
         process.exit(1);
-    }
-
-    // Proxy config logic moved to top of file
-    let PLAYWRIGHT_PROXY_CONFIG = undefined;
-    let AXIOS_PROXY_CONFIG = undefined;
-
-    if (process.env.SCRAPER_PROXY) {
-        try {
-            const proxyUrl = new URL(process.env.SCRAPER_PROXY);
-            PLAYWRIGHT_PROXY_CONFIG = {
-                server: `${proxyUrl.protocol}//${proxyUrl.host}`,
-                username: proxyUrl.username,
-                password: proxyUrl.password
-            };
-            AXIOS_PROXY_CONFIG = {
-                host: proxyUrl.hostname,
-                port: proxyUrl.port,
-                protocol: proxyUrl.protocol.replace(':', ''),
-                auth: proxyUrl.username && proxyUrl.password ? {
-                    username: proxyUrl.username,
-                    password: proxyUrl.password
-                } : undefined
-            };
-            console.log(`[proxy] Using proxy: ${PLAYWRIGHT_PROXY_CONFIG.server}`);
-        } catch (e) {
-            console.warn(`[proxy] Invalid proxy URL: ${e.message}`);
-        }
     }
 
     const browserArgs = [
@@ -1732,8 +1819,15 @@ async function scrape() {
                 skippedCount = 0; // reset if we find a new one
 
                 if (!DISABLE_JOB_FILTER) {
-                    if (shouldPrefilterSkip({ title: thread.title, url: thread.url })) {
-                        console.log(`  [SKIP:PREFILTER] ${thread.title}`);
+                    if (shouldPrefilterSkipSmart({
+                        title: thread.title,
+                        content: '',
+                        url: thread.url,
+                        prefix: thread.prefix,
+                        forum: thread.forum,
+                        sourceName: source.emitAs || source.name
+                    })) {
+                        console.log(`  [SKIP:OFFER] ${thread.title}`);
                         continue;
                     }
                 }
@@ -1771,9 +1865,16 @@ async function scrape() {
                 const minLen = Number(source.minContentLength || MIN_CONTENT_LENGTH);
                 if (content && content.length >= minLen) {
                     if (!DISABLE_JOB_FILTER) {
-                        const jobCheck = isJobTopic({ title: finalTitle, content, url: thread.url });
-                        if (!jobCheck.isJob) {
-                            console.log(`  [SKIP:NOTJOB] ${thread.title.substring(0, 60)}...`);
+                        const cls = classifyTopic({
+                            title: finalTitle,
+                            content,
+                            url: thread.url,
+                            prefix: thread.prefix,
+                            forum: thread.forum,
+                            sourceName: source.emitAs || source.name
+                        });
+                        if (cls.label === 'SERVICE_OFFER') {
+                            console.log(`  [SKIP:${cls.label}] ${thread.title.substring(0, 60)}... score:${cls.score}`);
                             continue;
                         }
                     }
