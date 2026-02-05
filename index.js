@@ -1326,7 +1326,7 @@ async function fetchThreadDetails(context, url, contentSelector, titleSelector, 
                 return text.replace(/\s+/g, ' ').trim();
             };
 
-            const extractSignatureText = () => {
+            const extractSignatureText = (rootEl) => {
                 const sigSelectors = [
                     '.userSignature',
                     '.postContent.userSignature',
@@ -1335,9 +1335,10 @@ async function fetchThreadDetails(context, url, contentSelector, titleSelector, 
                     '.message-signature',
                     '.signatureContainer'
                 ];
+                const root = rootEl || document;
                 const parts = [];
                 sigSelectors.forEach((sel) => {
-                    document.querySelectorAll(sel).forEach((el) => {
+                    root.querySelectorAll(sel).forEach((el) => {
                         const text = cleanText(el);
                         if (text) parts.push(text);
                     });
@@ -1399,7 +1400,7 @@ async function fetchThreadDetails(context, url, contentSelector, titleSelector, 
                 const els = document.querySelectorAll(sel);
                 if (els && els.length > 0) {
                     const text = cleanText(els[0]);
-                    if (text) candidates.push({ text });
+                    if (text) candidates.push({ text, el: els[0] });
                 }
             }
 
@@ -1407,7 +1408,7 @@ async function fetchThreadDetails(context, url, contentSelector, titleSelector, 
                 for (const sel of selectors) {
                     document.querySelectorAll(sel).forEach(el => {
                         const text = cleanText(el);
-                        if (text) candidates.push({ text });
+                        if (text) candidates.push({ text, el });
                     });
                 }
             }
@@ -1415,13 +1416,13 @@ async function fetchThreadDetails(context, url, contentSelector, titleSelector, 
             if (candidates.length === 0) {
                 const fallback = document.querySelector('article, .post, .thread-content, main');
                 const text = cleanText(fallback);
-                if (text) candidates.push({ text });
+                if (text) candidates.push({ text, el: fallback });
             }
 
             if (candidates.length === 0) {
                 const meta = document.querySelector('meta[name="description"], meta[property="og:description"], meta[name="twitter:description"]');
                 const metaText = meta ? (meta.getAttribute('content') || '').trim() : '';
-                if (metaText) candidates.push({ text: metaText });
+                if (metaText) candidates.push({ text: metaText, el: null });
             }
 
             if (candidates.length === 0) {
@@ -1446,7 +1447,11 @@ async function fetchThreadDetails(context, url, contentSelector, titleSelector, 
             }
 
             let text = best.text;
-            const signatureText = extractSignatureText();
+            let signatureRoot = null;
+            if (best.el) {
+                signatureRoot = best.el.closest('.message, .message--post, .post, .postContainer, article') || best.el;
+            }
+            const signatureText = extractSignatureText(signatureRoot);
             if (signatureText) {
                 text = text + '\n\nSignature: ' + signatureText;
             }
