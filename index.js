@@ -1279,6 +1279,31 @@ async function fetchThreadDetails(context, url, contentSelector, titleSelector, 
                 return text.replace(/\s+/g, ' ').trim();
             };
 
+            const extractSignatureText = () => {
+                const sigSelectors = [
+                    '.userSignature',
+                    '.postContent.userSignature',
+                    '.signature',
+                    '.post-signature',
+                    '.message-signature',
+                    '.signatureContainer'
+                ];
+                const parts = [];
+                sigSelectors.forEach((sel) => {
+                    document.querySelectorAll(sel).forEach((el) => {
+                        const text = cleanText(el);
+                        if (text) parts.push(text);
+                    });
+                });
+                if (parts.length === 0) return '';
+                const uniq = Array.from(new Set(parts));
+                const merged = uniq.join(' | ').trim();
+                if (merged.length > 500) {
+                    return merged.slice(0, 500);
+                }
+                return merged;
+            };
+
             const candidates = [];
 
             for (const sel of selectors) {
@@ -1331,7 +1356,11 @@ async function fetchThreadDetails(context, url, contentSelector, titleSelector, 
                 pageTitle = (document.title || '').trim();
             }
 
-            const text = best.text;
+            let text = best.text;
+            const signatureText = extractSignatureText();
+            if (signatureText) {
+                text = text + '\n\nSignature: ' + signatureText;
+            }
             return {
                 content: text.length > maxLen ? text.slice(0, maxLen) : text,
                 title: pageTitle
