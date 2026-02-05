@@ -241,7 +241,7 @@ const SOURCES = [
         contentSelector: CONTENT_SELECTORS.r10,
         maxThreads: 20,
         useScrapeDo: true,
-        useScrapeDoApi: false
+        useScrapeDoApi: true
     },
     {
         name: 'wmaraci',
@@ -269,8 +269,8 @@ const FEED_SOURCES = [
     {
         name: 'r10-sitemap',
         type: 'sitemap',
-        url: 'view-source:https://www.r10.net/sitemap.xml',
-        allowViewSource: true,
+        url: 'https://www.r10.net/sitemap.xml',
+        allowViewSource: false,
         contentSelector: CONTENT_SELECTORS.r10,
         emitAs: 'r10',
         prefilter: 'title',
@@ -1064,10 +1064,26 @@ async function handleAntiBot(page) {
     }
 }
 
-async function fetchThreadDetails(context, url, contentSelector, titleSelector) {
+async function fetchThreadDetails(context, url, contentSelector, titleSelector, options = {}) {
     const page = await context.newPage();
     try {
-        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
+        const useScrapeDo = options.useScrapeDo ?? USE_SCRAPE_DO_API;
+        let usedContent = false;
+        if (useScrapeDo && USE_SCRAPE_DO_API) {
+            const html = await fetchHtmlViaScrapeDo(url);
+            if (html && html.length > 1000) {
+                await page.setContent(html, { waitUntil: 'domcontentloaded' });
+                await page.evaluate((baseUrl) => {
+                    const base = document.createElement('base');
+                    base.href = baseUrl;
+                    document.head.prepend(base);
+                }, url);
+                usedContent = true;
+            }
+        }
+        if (!usedContent) {
+            await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
+        }
         await page.waitForTimeout(600);
 
         await waitForAnySelector(page, contentSelector, 8000);
@@ -1325,7 +1341,7 @@ async function processThreadsForSource(source, threads, context) {
     for (const thread of prefiltered) {
         await new Promise(resolve => setTimeout(resolve, 600));
 
-        const details = await fetchThreadDetails(context, thread.url, source.contentSelector, source.titleSelector);
+        const details = await fetchThreadDetails(context, thread.url, source.contentSelector, source.titleSelector, { useScrapeDo: source.useScrapeDo });
         const content = details?.content || '';
         let finalTitle = (thread.title || '').trim() || (details?.title || '').trim();
         if (!finalTitle) {
@@ -1654,7 +1670,7 @@ async function scrape() {
                 // Add delay between requests
                 await new Promise(resolve => setTimeout(resolve, 600));
 
-                const details = await fetchThreadDetails(activeContext, thread.url, source.contentSelector, source.titleSelector);
+                const details = await fetchThreadDetails(activeContext, thread.url, source.contentSelector, source.titleSelector, { useScrapeDo: source.useScrapeDo });
                 const content = details?.content || '';
                 let finalTitle = (thread.title || '').trim() || (details?.title || '').trim();
                 if (!finalTitle) {
