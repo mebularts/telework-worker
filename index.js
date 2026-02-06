@@ -967,13 +967,48 @@ function toArray(value) {
 
 function parseThreadDate(dateText) {
     if (!dateText) return null;
-    const text = String(dateText).trim();
+    let text = String(dateText).trim();
     if (!text) return null;
 
+    // Normalize ISO timezone offsets like +0000 -> +00:00
+    const tzNoColon = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?)([+-]\d{2})(\d{2})$/.exec(text);
+    if (tzNoColon) {
+        text = `${tzNoColon[1]}${tzNoColon[2]}:${tzNoColon[3]}`;
+    }
+
+    // Epoch seconds
+    if (/^\d{10}$/.test(text)) {
+        const ts = Number(text);
+        if (!Number.isNaN(ts)) return new Date(ts * 1000);
+    }
+
     const lower = text.toLowerCase();
-    let base = new Date();
+
+    // Relative times: "18 minutes ago", "2 hours ago"
+    const rel = /(\d+)\s*(minute|minutes|hour|hours|day|days)\s*ago/i.exec(text);
+    if (rel) {
+        const qty = Number(rel[1] || 0);
+        const unit = rel[2] || '';
+        const msMap = {
+            minute: 60000,
+            minutes: 60000,
+            hour: 3600000,
+            hours: 3600000,
+            day: 86400000,
+            days: 86400000
+        };
+        const ms = msMap[unit.toLowerCase()] || 0;
+        if (qty > 0 && ms > 0) {
+            return new Date(Date.now() - qty * ms);
+        }
+    }
+    if (/a moment ago|one minute ago/i.test(text)) {
+        return new Date(Date.now() - 60000);
+    }
+
+    let base = null;
     if (lower.includes('bugün') || lower.includes('today')) {
-        // today
+        base = new Date();
     } else if (lower.includes('dün') || lower.includes('yesterday')) {
         base = new Date(Date.now() - 24 * 3600 * 1000);
     } else {
@@ -984,20 +1019,30 @@ function parseThreadDate(dateText) {
             let year = Number(m[3]);
             if (year < 100) year += 2000;
             base = new Date(year, month, day);
-        } else {
-            const parsed = new Date(text);
-            if (!isNaN(parsed)) return parsed;
-            return null;
         }
     }
 
-    const tm = /(\d{1,2}):(\d{2})(?::(\d{2}))?/.exec(text);
-    if (tm) {
-        base.setHours(Number(tm[1]), Number(tm[2]), Number(tm[3] || 0), 0);
-    } else {
-        base.setHours(0, 0, 0, 0);
+    const tm = /(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(am|pm)?/i.exec(text);
+    if (base) {
+        if (tm) {
+            let hours = Number(tm[1]);
+            const minutes = Number(tm[2]);
+            const seconds = Number(tm[3] || 0);
+            const meridiem = (tm[4] || '').toLowerCase();
+            if (meridiem === 'pm' && hours < 12) hours += 12;
+            if (meridiem === 'am' && hours === 12) hours = 0;
+            base.setHours(hours, minutes, seconds, 0);
+        } else {
+            base.setHours(0, 0, 0, 0);
+        }
+        return base;
     }
-    return base;
+
+    // Cleanup and fallback parse
+    const cleaned = text.replace(/\bat\b/ig, ' ').replace(/\s+/g, ' ').trim();
+    const parsed = new Date(cleaned);
+    if (!isNaN(parsed)) return parsed;
+    return null;
 }
 
 function isTooOld(dateText) {
