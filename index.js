@@ -2369,9 +2369,21 @@ async function fetchThreadDetails(context, url, contentSelector, titleSelector, 
                     if (val) return val;
                 }
 
+                // Prefer explicit timestamps if available (e.g., BHW uses data-timestamp)
+                const timeEls = Array.from(document.querySelectorAll('time'));
+                const timestamps = timeEls
+                    .map(el => Number(el.getAttribute('data-timestamp')))
+                    .filter(n => Number.isFinite(n) && n > 0);
+                if (timestamps.length > 0) {
+                    const maxTs = Math.max(...timestamps);
+                    if (Number.isFinite(maxTs) && maxTs > 0) {
+                        return String(maxTs);
+                    }
+                }
+
                 const timeEl = document.querySelector('time[datetime]');
                 if (timeEl) {
-                    const val = (timeEl.getAttribute('datetime') || timeEl.innerText || '').trim();
+                    const val = (timeEl.getAttribute('datetime') || timeEl.getAttribute('title') || timeEl.innerText || '').trim();
                     if (val) return val;
                 }
                 const timeText = document.querySelector('time');
