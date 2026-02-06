@@ -41,6 +41,9 @@ jobs:
           CAPTCHA_TOKEN: ${{ secrets.CAPTCHA_TOKEN }}
           SCRAPER_PROXY: ${{ secrets.SCRAPER_PROXY }}
           UPWORK_ENABLED: 1
+          UPWORK_USE_SCRAPE_DO: 0
+          SCRAPER_DETAIL_CONCURRENCY: 3
+          SCRAPER_DETAIL_DELAY_MS: 200
 
       - name: Upload Debug Artifacts
         if: always()
