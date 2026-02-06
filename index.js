@@ -49,6 +49,8 @@ const UPWORK_CATEGORY_SLUGS = (process.env.UPWORK_CATEGORY_SLUGS || '')
     .map(s => s.trim())
     .filter(Boolean);
 const UPWORK_USE_SCRAPE_DO = process.env.UPWORK_USE_SCRAPE_DO === '1';
+const UPWORK_DEBUG = process.env.UPWORK_DEBUG === '1';
+const UPWORK_DEBUG_LIMIT = Number(process.env.UPWORK_DEBUG_LIMIT || '2');
 // Static category list captured from scraper/upwork-cat.html
 const UPWORK_STATIC_CATEGORIES = [
     '2d-game-art',
@@ -1338,17 +1340,29 @@ function isUpworkBlockedHtml(html) {
         if (lower.includes('access denied')) return true;
     }
     // If it's a "Jobs" page but doesn't have any job tiles, it might be a soft block or empty
-    if (html.includes('job-grid') && !html.includes('job-tile')) return true;
+    const hasJobTile = html.includes('data-qa="job-tile"') || html.includes('data-test="job-tile"') || html.includes('job-tile');
+    if (html.includes('job-grid') && !hasJobTile) return true;
     return false;
 }
 
-async function fetchHtmlViaBrowser(url, context) {
+async function fetchHtmlViaBrowser(url, context, options = {}) {
     if (!context) return null;
     const page = await context.newPage();
+    const waitSelector = options.waitSelector || '';
+    const waitNetworkIdle = options.waitNetworkIdle !== false;
+    const extraDelayMs = Number(options.extraDelayMs ?? 1500);
     try {
         await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
         await handleAntiBot(page);
-        await page.waitForTimeout(1500);
+        if (waitNetworkIdle) {
+            await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => { });
+        }
+        if (waitSelector) {
+            await page.waitForSelector(waitSelector, { timeout: 15000 }).catch(() => { });
+        }
+        if (extraDelayMs > 0) {
+            await page.waitForTimeout(extraDelayMs);
+        }
         return await page.content();
     } catch (e) {
         console.warn(`  [Upwork] Browser fetch failed: ${e.message.split('\n')[0]}`);
@@ -1415,7 +1429,11 @@ async function fetchUpworkHtml(url, context, options = {}) {
         }
     }
 
-    const html = await fetchHtmlViaBrowser(url, context);
+    const html = await fetchHtmlViaBrowser(url, context, {
+        waitSelector: 'section[data-qa="job-tile"], a[data-qa="job-title"], section.job-tile, a.job-title',
+        waitNetworkIdle: true,
+        extraDelayMs: 1500
+    });
     if (html && !isUpworkBlockedHtml(html)) {
         return html;
     }
@@ -1477,16 +1495,16 @@ function parseUpworkJobsFromCategoryHtml(html, categorySlug) {
     const cleanText = (value) => String(value || '').replace(/\s+/g, ' ').trim();
     const uniq = (arr) => Array.from(new Set(arr.filter(Boolean)));
 
-    $('section[data-qa="job-tile"]').each((_, el) => {
+    $('section[data-qa="job-tile"], section.job-tile, article[data-test="job-tile"], [data-test="job-tile"]').each((_, el) => {
         const tile = $(el);
-        const titleEl = tile.find('a[data-qa="job-title"]').first();
+        const titleEl = tile.find('a[data-qa="job-title"], a[data-test="job-title"], a.job-title, h2 a').first();
         const title = cleanText(titleEl.text());
         let url = cleanText(titleEl.attr('href') || '');
         if (url && url.startsWith('/')) {
             url = `https://www.upwork.com${url}`;
         }
 
-        const description = cleanText(tile.find('p[data-qa="job-description"]').first().text());
+        const description = cleanText(tile.find('p[data-qa="job-description"], p.job-description').first().text());
         const badgeText = cleanText(tile.find('.air3-badge-feature').first().text());
         const isNew = badgeText.toLowerCase() === 'new';
 
@@ -1498,7 +1516,7 @@ function parseUpworkJobsFromCategoryHtml(html, categorySlug) {
         const duration = cleanText(tile.find('div[data-qa="duration"] strong[data-qa="value"]').first().text());
         const experienceLevel = cleanText(tile.find('div[data-qa="expert-level"] strong[data-qa="value"]').first().text());
 
-        const skills = uniq(tile.find('span[data-qa="ontology-skill"], span[data-qa="legacy-skill"]').map((i, s) => cleanText($(s).text())).get());
+        const skills = uniq(tile.find('span[data-qa="ontology-skill"], span[data-qa="legacy-skill"], .skills-list span').map((i, s) => cleanText($(s).text())).get());
 
         let budget = '';
         const fixedPrice = tile.find('small[data-qa="fixed-price"]').first();
@@ -1563,6 +1581,7 @@ function buildUpworkJobContent(job) {
 async function scrapeUpwork(context) {
     if (!UPWORK_ENABLED) return;
     console.log('\n=== UPWORK ===');
+    let upworkDebugSaved = 0;
 
     const maxCategories = Number.isFinite(UPWORK_MAX_CATEGORIES) && UPWORK_MAX_CATEGORIES > 0 ? UPWORK_MAX_CATEGORIES : 10;
     const maxJobsPerCategory = Number.isFinite(UPWORK_MAX_JOBS_PER_CATEGORY) && UPWORK_MAX_JOBS_PER_CATEGORY > 0 ? UPWORK_MAX_JOBS_PER_CATEGORY : 50;
@@ -1627,6 +1646,17 @@ async function scrapeUpwork(context) {
         }
 
         const parsed = parseUpworkJobsFromCategoryHtml(html, slug);
+        if (UPWORK_DEBUG && parsed.length === 0 && upworkDebugSaved < UPWORK_DEBUG_LIMIT && html) {
+            const safeSlug = String(slug || 'unknown').replace(/[^a-z0-9_-]/gi, '_');
+            const debugName = `debug_upwork_${safeSlug}.html`;
+            try {
+                fs.writeFileSync(path.join(__dirname, debugName), html);
+                upworkDebugSaved += 1;
+                console.warn(`  [Upwork] Debug saved: ${debugName}`);
+            } catch (e) {
+                console.warn(`  [Upwork] Failed to save debug HTML: ${e.message.split('\n')[0]}`);
+            }
+        }
         jobsParsed += parsed.length;
 
         const limited = parsed.slice(0, maxJobsPerCategory);
