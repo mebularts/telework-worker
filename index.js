@@ -37,8 +37,8 @@ const SCRAPER_DETAIL_DELAY_MS = Number(process.env.SCRAPER_DETAIL_DELAY_MS || '2
 const SCRAPER_PREFLIGHT = process.env.SCRAPER_PREFLIGHT !== '0';
 const SCRAPER_PREFLIGHT_TIMEOUT_MS = Number(process.env.SCRAPER_PREFLIGHT_TIMEOUT_MS || '8000');
 const UPWORK_ENABLED = process.env.UPWORK_ENABLED === '1';
-const UPWORK_MAX_CATEGORIES = Number(process.env.UPWORK_MAX_CATEGORIES || '10');
-const UPWORK_MAX_JOBS_PER_CATEGORY = Number(process.env.UPWORK_MAX_JOBS_PER_CATEGORY || '50');
+const UPWORK_MAX_CATEGORIES = Number(process.env.UPWORK_MAX_CATEGORIES || '500');
+const UPWORK_MAX_JOBS_PER_CATEGORY = Number(process.env.UPWORK_MAX_JOBS_PER_CATEGORY || '100');
 const UPWORK_DELAY_MS = Number(process.env.UPWORK_DELAY_MS || '400');
 const UPWORK_TIMEOUT_MS = Number(process.env.UPWORK_TIMEOUT_MS || '20000');
 const UPWORK_RETRIES = Number(process.env.UPWORK_RETRIES || '1');
@@ -704,7 +704,12 @@ const OFF_TR = [
     /\bkampanya\b/i,
     /\blisans(l[ıi])?\b/i,
     /\bscript sat[ıi]/i,
-    /\bhaz[ıi]r sistem\b/i
+    /\bhaz[ıi]r sistem\b/i,
+    /\bnumara onay\b/i,
+    /\btakip[çc]i\b/i,
+    /\babone\b/i,
+    /\bbeğeni\b/i,
+    /\bsmm\b/i
 ];
 
 const REQ_EN = [
@@ -754,9 +759,12 @@ const JOB_NEGATIVE_STRONG_PATTERNS = [
     /\btoplu\b/i,
     /\bsponsor\b/i,
     /\bhizmetleri\b/i,
-    //    /\bcozumleri\b/i, // Too aggressive
-    //    /\bpaketleri\b/i, // Too aggressive
-    //    /\bsatisi\b/i, // Too aggressive
+    /\bnumara onay\b/i,
+    /\btakip[çc]i\b/i,
+    /\babone\b/i,
+    /\bbeğeni\b/i,
+    /\bsmm\b/i,
+    /\bbacklink paketi\b/i,
     /\bscripti\b/i,
     /\byazilimi\b/i,
     /\btemasi\b/i,
@@ -764,8 +772,6 @@ const JOB_NEGATIVE_STRONG_PATTERNS = [
     /\bsunucu\b/i,
     /\bdomain\b/i,
     /\blisans\b/i,
-    // /\bhesap\b/i, // Too aggressive (blocks 'hesap alinacak')
-    // /\baccount\b/i, // Too aggressive
     /\bsatilik hesap\b/i,
     /\bhesap satisi\b/i,
     /\bhesap satilik\b/i,
@@ -1271,11 +1277,16 @@ function decodeResponseBody(data, headers) {
 
 function isUpworkBlockedHtml(html) {
     if (!html) return true;
-    const lower = html.toLowerCase();
-    if (lower.includes('up-challenge-container')) return true;
-    if (lower.includes('cf-chl') || lower.includes('cloudflare')) return true;
-    if (lower.includes('enable javascript') && lower.includes('cookies')) return true;
-    if (lower.includes('challenge - upwork')) return true;
+    if (html.length < 5000) {
+        const lower = html.toLowerCase();
+        if (lower.includes('up-challenge-container')) return true;
+        if (lower.includes('cf-chl') || lower.includes('cloudflare')) return true;
+        if (lower.includes('enable javascript') && lower.includes('cookies')) return true;
+        if (lower.includes('challenge - upwork')) return true;
+        if (lower.includes('access denied')) return true;
+    }
+    // If it's a "Jobs" page but doesn't have any job tiles, it might be a soft block or empty
+    if (html.includes('job-grid') && !html.includes('job-tile')) return true;
     return false;
 }
 
@@ -1310,7 +1321,12 @@ async function fetchUpworkHtml(url, context, options = {}) {
     };
 
     if (useScrapeDo && process.env.SCRAPE_DO_TOKEN) {
-        const html = await fetchHtmlViaScrapeDo(url);
+        // Upwork requires render and super mode for reliable results
+        const isUpwork = url.includes('upwork.com');
+        const html = await fetchHtmlViaScrapeDo(url, {
+            render: isUpwork,
+            super: isUpwork
+        });
         if (html && !isUpworkBlockedHtml(html)) {
             return html;
         }
@@ -1438,7 +1454,14 @@ function parseUpworkJobsFromCategoryHtml(html, categorySlug) {
             budget = cleanText(fixedPrice.parent().find('strong').first().text());
         }
         if (!budget) {
-            const m = tile.text().match(/\$\s?\d[\d,]*(?:\.\d+)?/);
+            // Check for strong tags containing dollar signs (common in new layout)
+            const strongest = tile.find('strong').filter((i, el) => $(el).text().includes('$')).first();
+            if (strongest.length > 0) {
+                budget = cleanText(strongest.text());
+            }
+        }
+        if (!budget) {
+            const m = tile.text().match(/\$\s?[\d,]+(?:\.\d+)?/);
             if (m) budget = cleanText(m[0]);
         }
 
@@ -1730,13 +1753,18 @@ async function fetchXml(url, context, options = {}) {
     }
 }
 
-async function fetchHtmlViaScrapeDo(url) {
+async function fetchHtmlViaScrapeDo(url, params = {}) {
     if (!process.env.SCRAPE_DO_TOKEN) return null;
-    const targetUrl = `http://api.scrape.do?url=${encodeURIComponent(url)}&token=${process.env.SCRAPE_DO_TOKEN}`;
+    let targetUrl = `http://api.scrape.do?url=${encodeURIComponent(url)}&token=${process.env.SCRAPE_DO_TOKEN}`;
+
+    if (params.render) targetUrl += '&render=true';
+    if (params.super) targetUrl += '&super=true';
+    if (params.geoCode) targetUrl += `&geoCode=${params.geoCode}`;
+
     for (let attempt = 1; attempt <= 2; attempt++) {
         try {
             const response = await axios.get(targetUrl, {
-                timeout: 60000,
+                timeout: 90000, // rendering takes longer
                 responseType: 'arraybuffer',
                 headers: { 'User-Agent': DEFAULT_UA }
             });
@@ -1744,7 +1772,7 @@ async function fetchHtmlViaScrapeDo(url) {
         } catch (e) {
             const status = e?.response?.status;
             if (attempt < 2 && status && status >= 500) {
-                await new Promise(r => setTimeout(r, 1200));
+                await new Promise(r => setTimeout(r, 2000));
                 continue;
             }
             console.warn(`  [!] Scrape.do HTML fetch failed: ${url} -> ${e.message}`);
