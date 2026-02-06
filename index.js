@@ -25,12 +25,12 @@ const cheerio = require('cheerio');
 const WEBHOOK_URL = process.env.WEBHOOK_URL;
 const SCRAPER_TOKEN = process.env.SCRAPER_TOKEN;
 
-const MAX_THREADS_PER_SOURCE = 20;
-const MIN_CONTENT_LENGTH = 40;
-const MAX_CONTENT_LENGTH = 4000;
+const MAX_THREADS_PER_SOURCE = 30;
+const MIN_CONTENT_LENGTH = 10;
+const MAX_CONTENT_LENGTH = 9000;
 const ALLOW_MARKETPLACE = process.env.SCRAPER_ALLOW_MARKETPLACE === '1';
 const DISABLE_JOB_FILTER = process.env.SCRAPER_DISABLE_JOB_FILTER === '1';
-const MAX_THREAD_AGE_HOURS = Number(process.env.SCRAPER_MAX_THREAD_AGE_HOURS || '24');
+const MAX_THREAD_AGE_HOURS = Number(process.env.SCRAPER_MAX_THREAD_AGE_HOURS || '72');
 const STRICT_DATE = process.env.SCRAPER_STRICT_DATE === '1';
 const SCRAPER_DETAIL_CONCURRENCY = Number(process.env.SCRAPER_DETAIL_CONCURRENCY || '3');
 const SCRAPER_DETAIL_DELAY_MS = Number(process.env.SCRAPER_DETAIL_DELAY_MS || '200');
@@ -39,7 +39,7 @@ const SCRAPER_PREFLIGHT_TIMEOUT_MS = Number(process.env.SCRAPER_PREFLIGHT_TIMEOU
 const UPWORK_ENABLED = process.env.UPWORK_ENABLED === '1';
 const UPWORK_MAX_CATEGORIES = Number(process.env.UPWORK_MAX_CATEGORIES || '500');
 const UPWORK_MAX_JOBS_PER_CATEGORY = Number(process.env.UPWORK_MAX_JOBS_PER_CATEGORY || '100');
-const UPWORK_DELAY_MS = Number(process.env.UPWORK_DELAY_MS || '400');
+const UPWORK_DELAY_MS = Number(process.env.UPWORK_DELAY_MS || '1400');
 const UPWORK_TIMEOUT_MS = Number(process.env.UPWORK_TIMEOUT_MS || '20000');
 const UPWORK_RETRIES = Number(process.env.UPWORK_RETRIES || '1');
 const UPWORK_BACKOFF_MS = Number(process.env.UPWORK_BACKOFF_MS || '800');
