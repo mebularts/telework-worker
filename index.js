@@ -608,6 +608,11 @@ if (process.env.SCRAPE_DO_TOKEN) {
     }
 }
 
+let UPWORK_USE_SCRAPE_DO_EFFECTIVE = UPWORK_USE_SCRAPE_DO;
+if (USE_SCRAPE_DO_API && process.env.UPWORK_USE_SCRAPE_DO !== '0') {
+    UPWORK_USE_SCRAPE_DO_EFFECTIVE = true;
+}
+
 const JOB_URL_HINTS = [
     '/is-ilan', '/is-ilani', '/is-ilanlari',
     '/is-arayan', '/is-veren', '/isveren',
@@ -852,7 +857,9 @@ const FEED_SOURCES = [
         maxThreads: 20,
         maxItems: 20,
         minContentLength: 40,
-        useScrapeDo: true
+        useScrapeDo: true,
+        retries: 2,
+        retryBackoffMs: 1500
     },
     {
         name: 'wmaraci-sitemap',
@@ -1310,7 +1317,7 @@ async function fetchUpworkHtml(url, context, options = {}) {
     const timeoutMs = Number(options.timeoutMs ?? UPWORK_TIMEOUT_MS);
     const retries = Number(options.retries ?? UPWORK_RETRIES);
     const backoffBaseMs = Number(options.backoffBaseMs ?? UPWORK_BACKOFF_MS);
-    const useScrapeDo = options.useScrapeDo ?? UPWORK_USE_SCRAPE_DO;
+    const useScrapeDo = options.useScrapeDo ?? UPWORK_USE_SCRAPE_DO_EFFECTIVE;
 
     const headers = {
         'User-Agent': DEFAULT_UA,
@@ -1530,7 +1537,7 @@ async function scrapeUpwork(context) {
             retries: UPWORK_RETRIES,
             backoffBaseMs: UPWORK_BACKOFF_MS,
             timeoutMs: UPWORK_TIMEOUT_MS,
-            useScrapeDo: UPWORK_USE_SCRAPE_DO
+            useScrapeDo: UPWORK_USE_SCRAPE_DO_EFFECTIVE
         });
         if (!html) {
             console.warn('  [Upwork] Categories page blocked or empty.');
@@ -1566,7 +1573,7 @@ async function scrapeUpwork(context) {
             retries: UPWORK_RETRIES,
             backoffBaseMs: UPWORK_BACKOFF_MS,
             timeoutMs: UPWORK_TIMEOUT_MS,
-            useScrapeDo: UPWORK_USE_SCRAPE_DO
+            useScrapeDo: UPWORK_USE_SCRAPE_DO_EFFECTIVE
         });
         if (!html) {
             blockedPages += 1;
@@ -1872,7 +1879,18 @@ function extractSitemapUrls(xmlText) {
 
 async function fetchSitemapUrls(url, maxUrls = 50, depth = 0, context = null, options = {}) {
     if (depth > 2) return [];
-    const xml = await fetchXml(url, context, options);
+    const retries = Number(options.retries ?? 0);
+    const backoffMs = Number(options.retryBackoffMs ?? 1500);
+    let xml = null;
+    for (let attempt = 0; attempt <= retries; attempt++) {
+        xml = await fetchXml(url, context, options);
+        if (xml) break;
+        if (attempt < retries) {
+            const waitMs = backoffMs * Math.pow(2, attempt);
+            console.warn(`  [SITEMAP] Retry ${attempt + 1}/${retries} in ${waitMs}ms: ${url}`);
+            await sleep(waitMs);
+        }
+    }
     if (!xml) return [];
 
     const parsed = extractSitemapUrls(xml);
@@ -2681,7 +2699,12 @@ async function processFeedSource(feed, context) {
     } else if (feed.type === 'sitemap') {
         const sitemapUrl = sanitizeFeedUrl(feed.url, feed.allowViewSource);
         console.log(`Fetching Sitemap: ${sitemapUrl}`);
-        const urls = await fetchSitemapUrls(sitemapUrl, feed.maxItems || 60, 0, context, { useScrapeDo, timeoutMs: 60000 });
+        const urls = await fetchSitemapUrls(sitemapUrl, feed.maxItems || 60, 0, context, {
+            useScrapeDo,
+            timeoutMs: 60000,
+            retries: feed.retries,
+            retryBackoffMs: feed.retryBackoffMs
+        });
         const filtered = feed.urlAllow
             ? urls.filter(u => feed.urlAllow.some(r => r.test(u)))
             : urls;
