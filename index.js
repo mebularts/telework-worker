@@ -32,10 +32,18 @@ const ALLOW_MARKETPLACE = process.env.SCRAPER_ALLOW_MARKETPLACE === '1';
 const DISABLE_JOB_FILTER = process.env.SCRAPER_DISABLE_JOB_FILTER === '1';
 const MAX_THREAD_AGE_HOURS = Number(process.env.SCRAPER_MAX_THREAD_AGE_HOURS || '24');
 const STRICT_DATE = process.env.SCRAPER_STRICT_DATE === '1';
+const SCRAPER_DETAIL_CONCURRENCY = Number(process.env.SCRAPER_DETAIL_CONCURRENCY || '3');
+const SCRAPER_DETAIL_DELAY_MS = Number(process.env.SCRAPER_DETAIL_DELAY_MS || '200');
+const SCRAPER_PREFLIGHT = process.env.SCRAPER_PREFLIGHT !== '0';
+const SCRAPER_PREFLIGHT_TIMEOUT_MS = Number(process.env.SCRAPER_PREFLIGHT_TIMEOUT_MS || '8000');
 const UPWORK_ENABLED = process.env.UPWORK_ENABLED === '1';
 const UPWORK_MAX_CATEGORIES = Number(process.env.UPWORK_MAX_CATEGORIES || '10');
 const UPWORK_MAX_JOBS_PER_CATEGORY = Number(process.env.UPWORK_MAX_JOBS_PER_CATEGORY || '50');
-const UPWORK_DELAY_MS = Number(process.env.UPWORK_DELAY_MS || '1200');
+const UPWORK_DELAY_MS = Number(process.env.UPWORK_DELAY_MS || '400');
+const UPWORK_TIMEOUT_MS = Number(process.env.UPWORK_TIMEOUT_MS || '20000');
+const UPWORK_RETRIES = Number(process.env.UPWORK_RETRIES || '1');
+const UPWORK_BACKOFF_MS = Number(process.env.UPWORK_BACKOFF_MS || '800');
+const UPWORK_CATEGORY_CONCURRENCY = Number(process.env.UPWORK_CATEGORY_CONCURRENCY || '2');
 const UPWORK_CATEGORY_SLUGS = (process.env.UPWORK_CATEGORY_SLUGS || '')
     .split(',')
     .map(s => s.trim())
@@ -902,6 +910,43 @@ function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+function withJitter(ms, spread = 150) {
+    if (!ms || ms <= 0) return 0;
+    const extra = Math.floor(Math.random() * spread);
+    return ms + extra;
+}
+
+async function mapWithConcurrency(items, limit, mapper) {
+    const results = new Array(items.length);
+    let nextIndex = 0;
+    let running = 0;
+
+    return new Promise((resolve) => {
+        const runNext = () => {
+            if (nextIndex >= items.length && running === 0) {
+                resolve(results);
+                return;
+            }
+            while (running < limit && nextIndex < items.length) {
+                const currentIndex = nextIndex++;
+                running++;
+                Promise.resolve(mapper(items[currentIndex], currentIndex))
+                    .then(result => {
+                        results[currentIndex] = result;
+                    })
+                    .catch(() => {
+                        results[currentIndex] = null;
+                    })
+                    .finally(() => {
+                        running--;
+                        runNext();
+                    });
+            }
+        };
+        runNext();
+    });
+}
+
 function toArray(value) {
     if (!value) return [];
     return Array.isArray(value) ? value : [value];
@@ -1251,10 +1296,10 @@ async function fetchHtmlViaBrowser(url, context) {
 }
 
 async function fetchUpworkHtml(url, context, options = {}) {
-    const timeoutMs = Number(options.timeoutMs || 60000);
-    const retries = Number(options.retries ?? 2);
-    const backoffBaseMs = Number(options.backoffBaseMs ?? 1200);
-    const useScrapeDo = options.useScrapeDo ?? (UPWORK_USE_SCRAPE_DO || USE_SCRAPE_DO_API);
+    const timeoutMs = Number(options.timeoutMs ?? UPWORK_TIMEOUT_MS);
+    const retries = Number(options.retries ?? UPWORK_RETRIES);
+    const backoffBaseMs = Number(options.backoffBaseMs ?? UPWORK_BACKOFF_MS);
+    const useScrapeDo = options.useScrapeDo ?? UPWORK_USE_SCRAPE_DO;
 
     const headers = {
         'User-Agent': DEFAULT_UA,
@@ -1458,7 +1503,12 @@ async function scrapeUpwork(context) {
     } else {
         const categoriesUrl = 'https://www.upwork.com/freelance-jobs/';
         console.log(`Fetching categories: ${categoriesUrl}`);
-        const html = await fetchUpworkHtml(categoriesUrl, context, { retries: 2, backoffBaseMs: 1200 });
+        const html = await fetchUpworkHtml(categoriesUrl, context, {
+            retries: UPWORK_RETRIES,
+            backoffBaseMs: UPWORK_BACKOFF_MS,
+            timeoutMs: UPWORK_TIMEOUT_MS,
+            useScrapeDo: UPWORK_USE_SCRAPE_DO
+        });
         if (!html) {
             console.warn('  [Upwork] Categories page blocked or empty.');
             return;
@@ -1481,16 +1531,24 @@ async function scrapeUpwork(context) {
     let duplicatesSkipped = 0;
     let blockedPages = 0;
 
-    for (const slug of targets) {
-        if (delayMs > 0) await sleep(delayMs);
+    const catConcurrency = Math.max(1, UPWORK_CATEGORY_CONCURRENCY);
+    await mapWithConcurrency(targets, catConcurrency, async (slug) => {
+        if (delayMs > 0) {
+            await sleep(withJitter(delayMs, 200));
+        }
         const categoryUrl = `https://www.upwork.com/freelance-jobs/${slug}/`;
         console.log(`  [Upwork] Fetching: ${categoryUrl}`);
 
-        const html = await fetchUpworkHtml(categoryUrl, context, { retries: 2, backoffBaseMs: 1200 });
+        const html = await fetchUpworkHtml(categoryUrl, context, {
+            retries: UPWORK_RETRIES,
+            backoffBaseMs: UPWORK_BACKOFF_MS,
+            timeoutMs: UPWORK_TIMEOUT_MS,
+            useScrapeDo: UPWORK_USE_SCRAPE_DO
+        });
         if (!html) {
             blockedPages += 1;
             console.warn(`  [Upwork] Blocked/empty: ${slug}`);
-            continue;
+            return null;
         }
 
         const parsed = parseUpworkJobsFromCategoryHtml(html, slug);
@@ -1530,7 +1588,8 @@ async function scrapeUpwork(context) {
                 }
             });
         }
-    }
+        return true;
+    });
 
     console.log(`Upwork parsed: ${jobsParsed}, ready: ${jobsToSend.length}, duplicates: ${duplicatesSkipped}, blocked: ${blockedPages}`);
 
@@ -2101,9 +2160,36 @@ async function handleAntiBot(page) {
     }
 }
 
+async function preflightHtml(context, url, timeoutMs) {
+    if (!context || !url) return { ok: true };
+    try {
+        const response = await context.request.get(url, {
+            headers: {
+                'User-Agent': DEFAULT_UA,
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+            },
+            timeout: timeoutMs
+        });
+        const status = response.status();
+        if (status >= 400) {
+            return { ok: false, status };
+        }
+        return { ok: true, status };
+    } catch (e) {
+        return { ok: false, error: e.message.split('\n')[0] };
+    }
+}
+
 async function fetchThreadDetails(context, url, contentSelector, titleSelector, options = {}) {
     const page = await context.newPage();
     try {
+        if (options.prefilter) {
+            const pre = await preflightHtml(context, url, options.prefilterTimeoutMs || SCRAPER_PREFLIGHT_TIMEOUT_MS);
+            if (!pre.ok) {
+                console.log(`  [SKIP:PREFLIGHT] ${url} (${pre.status || pre.error || 'error'})`);
+                return null;
+            }
+        }
         const useScrapeDo = options.useScrapeDo ?? USE_SCRAPE_DO_API;
         const minLen = Number(options.minContentLength || MIN_CONTENT_LENGTH);
         const maxLen = Number(options.maxContentLength || MAX_CONTENT_LENGTH);
@@ -2121,11 +2207,17 @@ async function fetchThreadDetails(context, url, contentSelector, titleSelector, 
             }
         }
         if (!usedContent) {
-            await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
+            try {
+                await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
+            } catch (e) {
+                console.warn(`  [!] Fetch navigation warning: ${e.message.split('\n')[0]}`);
+            }
         }
-        await page.waitForTimeout(600);
-
-        await waitForAnySelector(page, contentSelector, 8000);
+        let found = await waitForAnySelector(page, contentSelector, 8000);
+        if (!found) {
+            await page.waitForLoadState('networkidle', { timeout: 6000 }).catch(() => { });
+            await waitForAnySelector(page, contentSelector, 8000);
+        }
 
         const details = await page.evaluate(({ selector, titleSelector, minLen, maxLen }) => {
             const selectors = selector.split(',').map(s => s.trim()).filter(Boolean);
@@ -2327,7 +2419,6 @@ async function collectLinksFromPage(context, url, options) {
         if (!usedContent) {
             await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
         }
-        await page.waitForTimeout(1200);
 
         const waitTarget = itemSelector || linkSelector || 'a';
         let found = await waitForAnySelector(page, waitTarget, 12000);
@@ -2403,6 +2494,74 @@ async function collectLinksFromPage(context, url, options) {
     }
 }
 
+async function enrichThreads(prefiltered, source, context) {
+    const enrichedThreads = [];
+    const concurrency = Math.max(1, SCRAPER_DETAIL_CONCURRENCY);
+    const minLen = Number(source.minContentLength || MIN_CONTENT_LENGTH);
+
+    await mapWithConcurrency(prefiltered, concurrency, async (thread) => {
+        if (SCRAPER_DETAIL_DELAY_MS > 0) {
+            await sleep(withJitter(SCRAPER_DETAIL_DELAY_MS));
+        }
+
+        const details = await fetchThreadDetails(
+            context,
+            thread.url,
+            source.contentSelector,
+            source.titleSelector,
+            {
+                useScrapeDo: source.useScrapeDo,
+                minContentLength: source.minContentLength,
+                prefilter: SCRAPER_PREFLIGHT && !(source.useScrapeDo && USE_SCRAPE_DO_API),
+                prefilterTimeoutMs: SCRAPER_PREFLIGHT_TIMEOUT_MS
+            }
+        );
+
+        const content = details?.content || '';
+        const publishedAt = details?.publishedAt || thread.published || '';
+        if (publishedAt && isTooOld(publishedAt)) {
+            console.log(`  [SKIP:OLD] ${(thread.title || thread.url).substring(0, 60)}...`);
+            return null;
+        }
+
+        let finalTitle = (thread.title || '').trim() || (details?.title || '').trim();
+        if (!finalTitle) {
+            finalTitle = deriveTitleFromUrl(thread.url);
+        }
+
+        if (!finalTitle) {
+            console.log(`  [SKIP:NOTITLE] ${thread.url.substring(0, 60)}...`);
+            return null;
+        }
+
+        if (content && content.length >= minLen) {
+            if (!DISABLE_JOB_FILTER) {
+                const cls = classifyTopic({
+                    title: finalTitle,
+                    content,
+                    url: thread.url,
+                    prefix: thread.prefix,
+                    forum: thread.forum,
+                    sourceName: source.emitAs || source.name
+                });
+                if (cls.label === 'SERVICE_OFFER') {
+                    console.log(`  [SKIP:${cls.label}] ${finalTitle.substring(0, 60)}... score:${cls.score}`);
+                    return null;
+                }
+            }
+            enrichedThreads.push({ ...thread, title: finalTitle, original_content: content });
+            console.log(`  [OK] ${finalTitle.substring(0, 60)}...`);
+            SEEN_URLS.add(thread.url);
+            return true;
+        }
+
+        console.log(`  [SKIP:NOCONTENT] ${finalTitle.substring(0, 60)}...`);
+        return null;
+    });
+
+    return enrichedThreads;
+}
+
 async function processThreadsForSource(source, threads, context) {
     const maxThreads = source.maxThreads || MAX_THREADS_PER_SOURCE;
     const prefilterMode = source.prefilter || 'smart';
@@ -2460,60 +2619,7 @@ async function processThreadsForSource(source, threads, context) {
 
     // saveSeenUrls moved to global scope
     console.log(`Fetching content for ${prefiltered.length} topics...`);
-
-    const enrichedThreads = [];
-    for (const thread of prefiltered) {
-        await new Promise(resolve => setTimeout(resolve, 600));
-
-        const details = await fetchThreadDetails(
-            context,
-            thread.url,
-            source.contentSelector,
-            source.titleSelector,
-            {
-                useScrapeDo: source.useScrapeDo,
-                minContentLength: source.minContentLength
-            }
-        );
-        const content = details?.content || '';
-        const publishedAt = details?.publishedAt || thread.published || '';
-        if (publishedAt && isTooOld(publishedAt)) {
-            console.log(`  [SKIP:OLD] ${(thread.title || thread.url).substring(0, 60)}...`);
-            continue;
-        }
-        let finalTitle = (thread.title || '').trim() || (details?.title || '').trim();
-        if (!finalTitle) {
-            finalTitle = deriveTitleFromUrl(thread.url);
-        }
-
-        if (!finalTitle) {
-            console.log(`  [SKIP:NOTITLE] ${thread.url.substring(0, 60)}...`);
-            continue;
-        }
-
-        const minLen = Number(source.minContentLength || MIN_CONTENT_LENGTH);
-        if (content && content.length >= minLen) {
-            if (!DISABLE_JOB_FILTER) {
-                const cls = classifyTopic({
-                    title: finalTitle,
-                    content,
-                    url: thread.url,
-                    prefix: thread.prefix,
-                    forum: thread.forum,
-                    sourceName: source.emitAs || source.name
-                });
-                if (cls.label === 'SERVICE_OFFER') {
-                    console.log(`  [SKIP:${cls.label}] ${finalTitle.substring(0, 60)}... score:${cls.score}`);
-                    continue;
-                }
-            }
-            enrichedThreads.push({ ...thread, title: finalTitle, original_content: content });
-            console.log(`  [OK] ${finalTitle.substring(0, 60)}...`);
-            SEEN_URLS.add(thread.url);
-        } else {
-            console.log(`  [SKIP:NOCONTENT] ${finalTitle.substring(0, 60)}...`);
-        }
-    }
+    const enrichedThreads = await enrichThreads(prefiltered, source, context);
 
     if (enrichedThreads.length > 0) {
         const sourceLabel = source.emitAs || source.name;
@@ -2683,8 +2789,6 @@ async function scrape() {
                 await mainPage.goto(source.url, { waitUntil: 'domcontentloaded', timeout: 45000 });
             }
 
-            await mainPage.waitForTimeout(1500);
-
             const safeName = source.name.replace(/[^a-z0-9]/gi, '_').toLowerCase();
             await mainPage.screenshot({ path: `nav_${safeName}.png`, fullPage: false });
 
@@ -2789,57 +2893,7 @@ async function scrape() {
             }
 
             console.log(`Fetching content for ${prefilteredThreads.length} topics...`);
-
-            // Fetch content for each thread using separate pages
-            const enrichedThreads = [];
-            for (const thread of prefilteredThreads) {
-                // Add delay between requests
-                await new Promise(resolve => setTimeout(resolve, 600));
-
-                const details = await fetchThreadDetails(
-                    activeContext,
-                    thread.url,
-                    source.contentSelector,
-                    source.titleSelector,
-                    {
-                        useScrapeDo: source.useScrapeDo,
-                        minContentLength: source.minContentLength
-                    }
-                );
-                const content = details?.content || '';
-                const publishedAt = details?.publishedAt || '';
-                if (publishedAt && isTooOld(publishedAt)) {
-                    console.log(`  [SKIP:OLD] ${(thread.title || thread.url).substring(0, 60)}...`);
-                    continue;
-                }
-                let finalTitle = (thread.title || '').trim() || (details?.title || '').trim();
-                if (!finalTitle) {
-                    finalTitle = deriveTitleFromUrl(thread.url);
-                }
-
-                const minLen = Number(source.minContentLength || MIN_CONTENT_LENGTH);
-                if (content && content.length >= minLen) {
-                    if (!DISABLE_JOB_FILTER) {
-                        const cls = classifyTopic({
-                            title: finalTitle,
-                            content,
-                            url: thread.url,
-                            prefix: thread.prefix,
-                            forum: thread.forum,
-                            sourceName: source.emitAs || source.name
-                        });
-                        if (cls.label === 'SERVICE_OFFER') {
-                            console.log(`  [SKIP:${cls.label}] ${thread.title.substring(0, 60)}... score:${cls.score}`);
-                            continue;
-                        }
-                    }
-                    enrichedThreads.push({ ...thread, title: finalTitle, original_content: content });
-                    console.log(`  [OK] ${finalTitle.substring(0, 60)}...`);
-                    SEEN_URLS.add(thread.url);
-                } else {
-                    console.log(`  [SKIP:NOCONTENT] ${thread.title.substring(0, 60)}...`);
-                }
-            }
+            const enrichedThreads = await enrichThreads(prefilteredThreads, source, activeContext);
 
             console.log(`Successfully fetched: ${enrichedThreads.length}/${prefilteredThreads.length}`);
 
